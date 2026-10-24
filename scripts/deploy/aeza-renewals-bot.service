@@ -1,0 +1,48 @@
+[Unit]
+Description=Aeza renewal Telegram menu poller
+Wants=network-online.target
+After=network-online.target aeza-renewals-api.service
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=aeza-renewals
+Group=aeza-renewals
+WorkingDirectory=/opt/aeza-renewals/current
+EnvironmentFile=/etc/aeza-renewals/environment
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONUTF8=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/aeza-renewals/current/.venv/bin/python -m backend.telegram_bot
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+KillMode=control-group
+TimeoutStopSec=45s
+
+StateDirectory=aeza-renewals
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadOnlyPaths=/opt/aeza-renewals
+ReadWritePaths=/var/lib/aeza-renewals
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aeza-renewals-bot
+
+[Install]
+WantedBy=multi-user.target

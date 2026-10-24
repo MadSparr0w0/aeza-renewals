@@ -1,0 +1,76 @@
+import json
+
+import httpx
+import pytest
+
+from scripts.configure_telegram import ProfileError, api_call, configure, read_profile, ROOT
+
+
+def test_profile_public_and_chat_scopes_and_readback():
+    profile = read_profile(ROOT / "assets/telegram/profile.json")
+    public = [item for item in profile["commands"] if item["command"] in {"start", "help"}]
+    requests = []
+
+    def respond(request):
+        method = request.url.path.rsplit("/", 1)[-1]
+        payload = json.loads(request.content) if "application/json" in request.headers.get("content-type", "") else {}
+        requests.append((method, payload))
+        result = True
+        if method == "getMe":
+            result = {"id": 123, "username": "InKeepbot"}
+        elif method == "getChat":
+            result = {"id": 456, "type": "private"}
+        elif method in {"getMyName", "getMyDescription", "getMyShortDescription"}:
+            key = {"getMyName": "name", "getMyDescription": "description", "getMyShortDescription": "short_description"}[method]
+            result = {key: profile[key]}
+        elif method == "getMyCommands":
+            result = profile["commands"] if payload.get("scope") else public
+        elif method == "getChatMenuButton":
+            result = {"type": "commands"}
+        elif method == "getUserProfilePhotos":
+            result = {"total_count": 1, "photos": [[{"file_id": "fake-public-photo"}]]}
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        result = configure(client, "fake-test-token", "456", profile, "InKeepbot", b"\xff\xd8\xfffake")
+    assert result["profile_verified"] and result["menu_verified"] and result["avatar_applied"]
+    writes = [payload for method, payload in requests if method == "setMyCommands"]
+    assert len(writes) == 4
+    assert all(payload["commands"] == public for payload in writes if not payload.get("scope"))
+    assert all(payload["scope"] == {"type": "chat", "chat_id": "456"} for payload in writes if payload.get("scope"))
+    assert not any(method == "sendMessage" for method, _ in requests)
+
+
+def test_wrong_bot_cannot_change_profile():
+    requests = []
+
+    def respond(request):
+        requests.append(request.url.path.rsplit("/", 1)[-1])
+        return httpx.Response(200, json={"ok": True, "result": {"username": "another_bot"}})
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(ProfileError, match="unexpected_bot_no_changes_made"):
+            configure(client, "fake-test-token", "456", read_profile(ROOT / "assets/telegram/profile.json"), "InKeepbot")
+    assert requests == ["getMe"]
+
+
+def test_network_error_never_exposes_secret_url():
+    token = "fake-sensitive-test-token"
+
+    def respond(request):
+        raise httpx.ReadTimeout("unsafe diagnostic " + str(request.url), request=request)
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(ProfileError) as exc:
+            api_call(client, token, "setMyDescription", {"description": "test"})
+    assert str(exc.value) == "telegram_network_result_unknown"
+    assert token not in str(exc.value)
+
+
+def test_malformed_command_rejected_before_network(tmp_path):
+    profile = json.loads((ROOT / "assets/telegram/profile.json").read_text(encoding="utf-8"))
+    profile["commands"][0]["command"] = "start@another_bot"
+    path = tmp_path / "profile.json"
+    path.write_text(json.dumps(profile), encoding="utf-8")
+    with pytest.raises(ProfileError, match="invalid_command"):
+        read_profile(path)

@@ -1,0 +1,621 @@
+"""Read-only Telegram menu: python -m backend.telegram_bot.
+
+The polling offset is committed BEFORE any Telegram reply. Ambiguous replies
+are never replayed automatically. A database lease permits one poller per token;
+the bot does not consume or modify the reminder worker's outbox.
+"""
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+from datetime import date, timedelta
+import hashlib
+import ipaddress
+from html import escape
+import json
+import logging
+from pathlib import Path
+import re
+import signal
+import sys
+import threading
+import time
+import uuid
+from urllib.parse import urlsplit
+
+import httpx
+
+from .config import load_settings
+from .db import connect, initialize, transaction
+from .domain import CURRENCIES, materialize, money, month_end
+
+logger = logging.getLogger("invoice_keeper.telegram_bot")
+PAGE_SIZE = 6
+MAX_PAGE = 999
+MAX_TEXT = 3800
+POLL_SECONDS = 20
+LEASE_SECONDS = 90
+HEARTBEAT_SECONDS = 10
+RATE_WINDOW = 10
+RATE_COUNT = 8
+RECEIPT_DAYS = 7
+RECEIPT_LIMIT = 1000
+PRODUCT_NAME = "Aéza · Контроль продлений"
+AEZA_ACCOUNT_URL = "https://my.aeza.ru/"
+VIEWS = frozenset({"menu", "summary", "payments", "upcoming", "overdue", "help"})
+MONTH_NAMES = ("январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь")
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS telegram_pollers (
+ scope TEXT PRIMARY KEY, next_offset INTEGER NOT NULL DEFAULT 0,
+ lease_owner TEXT, lease_until INTEGER NOT NULL DEFAULT 0,
+ heartbeat_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS telegram_updates (
+ scope TEXT NOT NULL, update_id INTEGER NOT NULL, processed_at INTEGER NOT NULL,
+ outcome TEXT NOT NULL, PRIMARY KEY(scope,update_id)
+);
+CREATE TABLE IF NOT EXISTS telegram_rate_limits (
+ scope TEXT PRIMARY KEY, window_started INTEGER NOT NULL, request_count INTEGER NOT NULL
+);
+"""
+
+
+@dataclass(frozen=True)
+class BotView:
+    text: str
+    reply_markup: dict
+
+
+@dataclass(frozen=True)
+class BotAction:
+    method: str
+    payload: dict
+    callback_id: str | None = None
+
+
+class TelegramError(Exception):
+    """Only a fixed diagnostic code is retained; never a secret URL/body."""
+
+    def __init__(self, code: str, retry_after: int = 0):
+        super().__init__(code)
+        self.code = code
+        self.retry_after = retry_after
+
+
+def token_scope(token: str) -> str:
+    return hashlib.sha256(b"invoice-keeper-poller\0" + token.encode()).hexdigest()
+
+
+def ensure_schema(settings):
+    with connect(settings) as db:
+        db.executescript(SCHEMA)
+
+
+def acquire_lease(db, scope: str, owner: str, now: int) -> bool:
+    with transaction(db):
+        db.execute("INSERT OR IGNORE INTO telegram_pollers(scope) VALUES(?)", (scope,))
+        changed = db.execute("""UPDATE telegram_pollers SET lease_owner=?,lease_until=?,heartbeat_at=?
+          WHERE scope=? AND (lease_owner=? OR lease_until<=?)""",
+                             (owner, now + LEASE_SECONDS, now, scope, owner, now))
+        return changed.rowcount == 1
+
+
+def heartbeat(db, scope: str, owner: str, now: int) -> bool:
+    with transaction(db):
+        changed = db.execute("""UPDATE telegram_pollers SET lease_until=?,heartbeat_at=?
+          WHERE scope=? AND lease_owner=? AND lease_until>?""",
+                             (now + LEASE_SECONDS, now, scope, owner, now))
+        return changed.rowcount == 1
+
+
+def release_lease(db, scope: str, owner: str):
+    with transaction(db):
+        db.execute("UPDATE telegram_pollers SET lease_owner=NULL,lease_until=0 WHERE scope=? AND lease_owner=?", (scope, owner))
+
+
+def lease_owned(db, scope: str, owner: str, now: int) -> bool:
+    return db.execute("SELECT 1 FROM telegram_pollers WHERE scope=? AND lease_owner=? AND lease_until>?", (scope, owner, now)).fetchone() is not None
+
+
+def reserve_update(db, scope: str, owner: str, update_id: int, now: int) -> bool:
+    """Persist acknowledgement before send/edit/answerCallbackQuery."""
+    with transaction(db):
+        row = db.execute("SELECT next_offset FROM telegram_pollers WHERE scope=? AND lease_owner=? AND lease_until>?", (scope, owner, now)).fetchone()
+        if row is None:
+            raise TelegramError("lease_lost")
+        if update_id < row["next_offset"]:
+            return False
+        receipt = db.execute("INSERT OR IGNORE INTO telegram_updates(scope,update_id,processed_at,outcome) VALUES(?,?,?,'processing')", (scope, update_id, now))
+        db.execute("UPDATE telegram_pollers SET next_offset=? WHERE scope=? AND lease_owner=?", (update_id + 1, scope, owner))
+        return receipt.rowcount == 1
+
+
+def record_outcome(db, scope: str, update_id: int, outcome: str):
+    db.execute("UPDATE telegram_updates SET outcome=? WHERE scope=? AND update_id=?", (outcome, scope, update_id))
+
+
+def prune_receipts(db, scope: str, now: int):
+    """The monotonic offset deduplicates old updates after audit cleanup."""
+    with transaction(db):
+        db.execute("""DELETE FROM telegram_updates WHERE scope=? AND
+          (processed_at<? OR update_id NOT IN
+          (SELECT update_id FROM telegram_updates WHERE scope=? ORDER BY update_id DESC LIMIT ?))""",
+                   (scope, now - RECEIPT_DAYS * 86400, scope, RECEIPT_LIMIT))
+
+
+def within_rate_limit(db, scope: str, now: int) -> bool:
+    with transaction(db):
+        row = db.execute("SELECT * FROM telegram_rate_limits WHERE scope=?", (scope,)).fetchone()
+        if row is None or now - row["window_started"] >= RATE_WINDOW or now < row["window_started"]:
+            db.execute("INSERT INTO telegram_rate_limits(scope,window_started,request_count) VALUES(?,?,1) ON CONFLICT(scope) DO UPDATE SET window_started=excluded.window_started,request_count=1", (scope, now))
+            return True
+        if row["request_count"] >= RATE_COUNT:
+            return False
+        db.execute("UPDATE telegram_rate_limits SET request_count=request_count+1 WHERE scope=?", (scope,))
+        return True
+
+
+def checked_month(value: str | None, today: date) -> date:
+    value = value or today.strftime("%Y-%m")
+    if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}", value):
+        raise ValueError("Некорректный месяц.")
+    result = date.fromisoformat(value + "-01")
+    if not 2000 <= result.year <= today.year + 5:
+        raise ValueError("Месяц вне разрешённого диапазона.")
+    return result
+
+
+def callback_data(view: str, month: str, page: int = 0) -> str:
+    return f"ik:{view}:{month}:{page}"
+
+
+def parse_callback(value, today):
+    if not isinstance(value, str) or len(value.encode("utf-8")) > 64:
+        return None
+    match = re.fullmatch(r"ik:(menu|summary|payments|upcoming|overdue|help):(\d{4}-\d{2}):(\d{1,3})", value)
+    if not match:
+        return None
+    view, month, page = match.groups()
+    try:
+        checked_month(month, today)
+    except ValueError:
+        return None
+    return view, month, int(page)
+
+
+def module_url(origin: str) -> str | None:
+    """Only link the configured public HTTPS panel, never a local dev server."""
+    try:
+        parsed = urlsplit(origin)
+        host = parsed.hostname or ""
+        if (parsed.scheme != "https" or not host or parsed.username or parsed.password
+                or parsed.path or parsed.query or parsed.fragment
+                or host.lower() == "localhost" or host.lower().endswith(".localhost")):
+            return None
+        try:
+            if not ipaddress.ip_address(host).is_global:
+                return None
+        except ValueError:
+            pass
+        return origin
+    except ValueError:
+        return None
+
+
+def keyboard(view: str, month: date, today: date, page=0, pages=1, panel_url=None):
+    key = month.strftime("%Y-%m")
+    button = lambda text, target, selected_month=key, selected_page=0: {"text": text, "callback_data": callback_data(target, selected_month, selected_page)}
+    rows = [[button("📊 Сводка", "summary"), button("🧾 Продления", "payments")],
+            [button("📅 Ближайшие", "upcoming"), button("⚠️ Просрочки", "overdue")]]
+    for row in rows:
+        for item in row:
+            if view in {"summary", "payments", "upcoming", "overdue"} and item["callback_data"].startswith("ik:" + view + ":"):
+                item["style"] = "primary"
+    if view in {"summary", "payments"}:
+        navigation = []
+        previous = month - timedelta(days=1)
+        following = (month_end(month) + timedelta(days=1))
+        if previous.year >= 2000:
+            navigation.append(button("‹ " + MONTH_NAMES[previous.month - 1].capitalize(), view, previous.strftime("%Y-%m")))
+        if following.year <= today.year + 5:
+            navigation.append(button(MONTH_NAMES[following.month - 1].capitalize() + " ›", view, following.strftime("%Y-%m")))
+        if navigation:
+            rows.append(navigation)
+    if pages > 1:
+        navigation = []
+        if page:
+            navigation.append(button("‹ Назад", view, key, page - 1))
+        if page + 1 < pages:
+            navigation.append(button("Далее ›", view, key, page + 1))
+        rows.append(navigation)
+    if view in {"menu", "help"}:
+        if panel_url:
+            rows.append([{"text": "🗂 Модуль продлений", "url": panel_url}])
+        rows.append([{"text": "🔗 Кабинет Aéza", "url": AEZA_ACCOUNT_URL}])
+    rows.append([button("🔄 Обновить", view, key, page), button("🏠 Меню", "menu", today.strftime("%Y-%m"))])
+    return {"inline_keyboard": rows}
+
+
+def human_money(minor: int) -> str:
+    whole, cents = money(minor).split(".")
+    return f"{int(whole):,}".replace(",", " ") + "," + cents
+
+
+def safe_name(value: str) -> str:
+    value = " ".join(value.split())
+    if len(value) > 70:
+        value = value[:69] + "…"
+    return escape(value, quote=True)
+
+
+def build_view(db, settings, view="menu", month=None, page=0) -> BotView:
+    """Build bounded HTML and buttons; no Telegram requests or payment edits.
+
+    Derived monthly periods are materialized in a transaction for views that
+    read financial data. Call with an idle database connection, not in a nested
+    transaction. Useful for a deliberate one-time menu send by the operator.
+    """
+    today = settings.today
+    if view not in VIEWS or isinstance(page, bool) or not isinstance(page, int) or not 0 <= page <= MAX_PAGE:
+        raise ValueError("Некорректный раздел или страница.")
+    first = checked_month(month, today)
+    key = first.strftime("%Y-%m")
+    label = MONTH_NAMES[first.month - 1] + " " + str(first.year)
+    if view == "menu":
+        text = "<b>🗂 " + PRODUCT_NAME + "</b>\n\nСроки продлений и история отметок оплаты. Напоминания — за 3 дня до срока. Учёт команда ведёт вручную в веб-панели.\n\n«Модуль продлений» — панель учёта. «Кабинет Aéza» — оплата и управление услугами с отдельным входом.\n\n/help — описание команд."
+        return BotView(text, keyboard(view, first, today, panel_url=module_url(settings.origin)))
+    if view == "help":
+        text = "<b>ℹ️ Помощь</b>\n<b>" + PRODUCT_NAME + "</b>\n\n/start или /menu — открыть меню\n/summary — итоги продлений за текущий месяц\n/payments — сроки продлений за текущий месяц\n/upcoming — неоплаченные продления на ближайшие 7 дней\n/overdue — все неоплаченные просрочки\n/help — эта справка\n\nКнопки месяцев меняют период, «Обновить» показывает свежие данные. Кнопки обновляют это же сообщение.\n\nRUB, USD и EUR учитываются отдельно. Даты — в часовом поясе " + escape(settings.timezone) + ". В день срока просрочки нет.\n\nДанные вносятся вручную. Отметка «Оплачено» фиксирует подтверждение команды и не проводит платёж. Прекращение учёта не удаляет сервер.\n\nДля оплаты и управления реальными услугами откройте «Кабинет Aéza»; вход в него отдельный. Бот показывает данные только разрешённого чата."
+        return BotView(text, keyboard(view, first, today, panel_url=module_url(settings.origin)))
+    with transaction(db):
+        horizon = month_end(first) if view in {"summary", "payments"} else today + timedelta(days=7)
+        materialize(db, today, horizon)
+        if view == "summary":
+            totals = {currency: {"planned": 0, "paid": 0, "unpaid": 0, "overdue": 0} for currency in CURRENCIES}
+            count = paid_count = 0
+            rows = db.execute("""SELECT currency,COUNT(*) AS total,SUM(is_paid) AS paid_count,
+              SUM(amount_minor) AS planned,
+              SUM(CASE WHEN is_paid=1 THEN amount_minor ELSE 0 END) AS paid,
+              SUM(CASE WHEN is_paid=0 THEN amount_minor ELSE 0 END) AS unpaid,
+              SUM(CASE WHEN is_paid=0 AND due_date<? THEN amount_minor ELSE 0 END) AS overdue
+              FROM payment_occurrences WHERE substr(due_date,1,7)=? GROUP BY currency""", (today.isoformat(), key)).fetchall()
+            for row in rows:
+                totals[row["currency"]] = {field: row[field] for field in totals[row["currency"]]}
+                count += row["total"]
+                paid_count += row["paid_count"]
+            lines = ["<b>📊 Продления Aéza · " + label + "</b>"]
+            for currency, amounts in totals.items():
+                lines.extend(["", "<b>" + currency + "</b>", "План: " + human_money(amounts["planned"]),
+                              "Оплачено: " + human_money(amounts["paid"]), "К оплате: " + human_money(amounts["unpaid"]),
+                              "Просрочено: " + human_money(amounts["overdue"])])
+            lines.extend(["", f"Периодов: {count} · оплачено: {paid_count}", "Валюты не конвертируются. Отметки оплаты ведутся вручную."])
+            return BotView("\n".join(lines), keyboard(view, first, today))
+        if view == "payments":
+            where, values = "substr(o.due_date,1,7)=?", [key]
+            title = "🧾 Продления · " + label
+        elif view == "upcoming":
+            where, values = "o.is_paid=0 AND o.due_date>=? AND o.due_date<=?", [today.isoformat(), (today + timedelta(days=7)).isoformat()]
+            title = "📅 Продления на ближайшие 7 дней"
+        else:
+            where, values = "o.is_paid=0 AND o.due_date<?", [today.isoformat()]
+            title = "⚠️ Просроченные продления"
+        total = db.execute("SELECT COUNT(*) FROM payment_occurrences o WHERE " + where, values).fetchone()[0]
+        pages = max(1, min(MAX_PAGE + 1, (total + PAGE_SIZE - 1) // PAGE_SIZE))
+        page = min(page, pages - 1)
+        rows = db.execute("""SELECT o.*,r.active FROM payment_occurrences o
+          JOIN recurring_payments r ON r.id=o.recurring_payment_id WHERE """ + where + " ORDER BY o.due_date,o.id LIMIT ? OFFSET ?", [*values, PAGE_SIZE, page * PAGE_SIZE]).fetchall()
+    lines = ["<b>" + title + "</b>", ""]
+    for row in rows:
+        due = date.fromisoformat(row["due_date"])
+        if row["is_paid"]:
+            status = "отметка об оплате: " + date.fromisoformat(row["paid_at"]).strftime("%d.%m.%Y")
+        elif due < today:
+            status = "просрочка: " + str((today - due).days) + " дн."
+        else:
+            status = "оплата не отмечена"
+        archived = " · архив" if not row["active"] else ""
+        lines.extend(["<b>" + safe_name(row["name"]) + "</b>" + archived,
+                      human_money(row["amount_minor"]) + " " + row["currency"] + " · " + due.strftime("%d.%m.%Y"), status, ""])
+    if not rows:
+        lines.append("Продлений в этом разделе нет.")
+    else:
+        lines.append(f"Страница {page + 1} из {pages} · записей: {total}")
+    text = "\n".join(lines)
+    if len(text) > MAX_TEXT:
+        raise ValueError("Сообщение превышает безопасный размер.")
+    return BotView(text, keyboard(view, first, today, page, pages))
+
+
+def authorized_context(settings, update):
+    if not isinstance(update, dict):
+        return None
+    callback = update.get("callback_query")
+    if isinstance(callback, dict):
+        message = callback.get("message")
+        if not isinstance(message, dict) or not isinstance(callback.get("id"), str) or len(callback["id"]) > 128:
+            return None
+        chat = message.get("chat")
+        sender = callback.get("from")
+        if not isinstance(chat, dict) or str(chat.get("id")) != settings.telegram_chat_id:
+            return None
+        if chat.get("type") not in {"private", "group", "supergroup", "channel"}:
+            return None
+        if chat.get("type") == "private" and (not isinstance(sender, dict) or str(sender.get("id")) != str(chat["id"])):
+            return None
+        if not isinstance(message.get("message_id"), int) or isinstance(message["message_id"], bool) or message["message_id"] <= 0:
+            return None
+        return message, callback
+    message = update.get("message")
+    if not isinstance(message, dict) or not isinstance(message.get("chat"), dict):
+        return None
+    if str(message["chat"].get("id")) != settings.telegram_chat_id:
+        return None
+    return message, None
+
+
+def handle_update(settings, db, update, bot_username=None) -> BotAction | None:
+    """Authorize before reading financial tables. No mutation commands exist."""
+    context = authorized_context(settings, update)
+    if context is None:
+        return None
+    message, callback = context
+    if callback:
+        selected = parse_callback(callback.get("data"), settings.today)
+        if selected is None:
+            return BotAction("answerCallbackQuery", {"callback_query_id": callback["id"], "text": "Кнопка устарела. Откройте /menu."})
+        view, month, page = selected
+    else:
+        text = message.get("text")
+        if not isinstance(text, str) or len(text) > 4096 or not text.startswith("/"):
+            return None
+        addressed = text.split(maxsplit=1)[0].split("@", 1)
+        if len(addressed) > 1 and (not bot_username or addressed[1].casefold() != bot_username.casefold()):
+            return None
+        command = addressed[0].lower()
+        view = {"/start": "menu", "/menu": "menu", "/summary": "summary", "/payments": "payments", "/upcoming": "upcoming", "/overdue": "overdue", "/help": "help"}.get(command, "help")
+        month, page = None, 0
+    rendered = build_view(db, settings, view, month, page)
+    payload = {"chat_id": message["chat"]["id"], "text": rendered.text, "parse_mode": "HTML", "reply_markup": rendered.reply_markup, "disable_web_page_preview": True}
+    if callback:
+        payload["message_id"] = message["message_id"]
+        return BotAction("editMessageText", payload, callback["id"])
+    return BotAction("sendMessage", payload)
+
+
+class TelegramClient:
+    METHODS = frozenset({"getMe", "getWebhookInfo", "getUpdates", "sendMessage", "editMessageText", "answerCallbackQuery"})
+
+    def __init__(self, token: str, client=None):
+        # HTTPX's INFO request line embeds the bot token in the URL. Keep the
+        # protection when this helper is imported outside the CLI as well.
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
+        self._token = token
+        self._owned = client is None
+        self._client = client or httpx.Client(timeout=httpx.Timeout(30, connect=5, write=10, pool=5), follow_redirects=False)
+
+    def close(self):
+        if self._owned:
+            self._client.close()
+
+    def call(self, method: str, payload=None):
+        if method not in self.METHODS:
+            raise TelegramError("method_not_allowed")
+        try:
+            with self._client.stream("POST", "https://api.telegram.org/bot" + self._token + "/" + method, json=payload or {}) as response:
+                body = bytearray()
+                for chunk in response.iter_bytes():
+                    body.extend(chunk)
+                    if len(body) > 2 * 1024 * 1024:
+                        raise TelegramError("response_too_large")
+                try:
+                    data = json.loads(body)
+                except (ValueError, UnicodeDecodeError):
+                    raise TelegramError("invalid_response") from None
+                if not isinstance(data, dict):
+                    raise TelegramError("invalid_response")
+                if response.status_code == 200 and data.get("ok") is True:
+                    return data.get("result")
+                if data.get("error_code") == 400 and method == "editMessageText" and "message is not modified" in str(data.get("description", "")).lower():
+                    return True
+                code = data.get("error_code", response.status_code)
+                if code == 429:
+                    parameters = data.get("parameters")
+                    delay = parameters.get("retry_after", 10) if isinstance(parameters, dict) else 10
+                    delay = min(max(delay, 1), 300) if isinstance(delay, int) else 10
+                    raise TelegramError("rate_limited", delay)
+                if code == 409:
+                    raise TelegramError("polling_conflict")
+                if code in {401, 403}:
+                    raise TelegramError("access_rejected")
+                raise TelegramError("telegram_rejected")
+        except httpx.TimeoutException:
+            raise TelegramError("request_timeout") from None
+        except httpx.HTTPError:
+            raise TelegramError("network_error") from None
+
+
+def process_update(settings, db, client, scope, owner, update, now=None, bot_username=None):
+    current_time = (lambda: int(time.time())) if now is None else (lambda: now)
+    observed_at = current_time()
+    update_id = update.get("update_id") if isinstance(update, dict) else None
+    if isinstance(update_id, bool) or not isinstance(update_id, int) or not 0 <= update_id < 2**63 - 1:
+        return "ignored"
+    if not reserve_update(db, scope, owner, update_id, observed_at):
+        return "duplicate"
+    if authorized_context(settings, update) is None:
+        record_outcome(db, scope, update_id, "ignored")
+        return "ignored"
+    if not within_rate_limit(db, scope, observed_at):
+        # No financial data and no repeated API responses during a flood.
+        record_outcome(db, scope, update_id, "throttled")
+        return "throttled"
+    try:
+        action = handle_update(settings, db, update, bot_username)
+        if action is None:
+            record_outcome(db, scope, update_id, "ignored")
+            return "ignored"
+        if not lease_owned(db, scope, owner, current_time()):
+            raise TelegramError("lease_lost")
+        if action.callback_id:
+            client.call("answerCallbackQuery", {"callback_query_id": action.callback_id})
+        if not lease_owned(db, scope, owner, current_time()):
+            raise TelegramError("lease_lost")
+        client.call(action.method, action.payload)
+        record_outcome(db, scope, update_id, "answered")
+        return "answered"
+    except TelegramError as exc:
+        outcome = "unknown" if exc.code in {"request_timeout", "network_error", "invalid_response", "response_too_large"} else "failed"
+        record_outcome(db, scope, update_id, outcome)
+        logger.warning("Ответ бота не подтверждён: %s. Автоматического повтора нет.", exc.code)
+        return outcome
+    except Exception:
+        record_outcome(db, scope, update_id, "failed")
+        logger.error("Не удалось обработать команду бота; секреты и содержимое запроса не журналируются.")
+        return "failed"
+
+
+def run_polling(settings, client=None, stop_event=None, stop_file: Path | None = None):
+    """Run one leased poller. No webhook deletion or automatic reply retries."""
+    if not settings.telegram_bot_token or not re.fullmatch(r"-?[1-9]\d{0,19}", settings.telegram_chat_id):
+        logger.error("Для меню бота укажите TELEGRAM_BOT_TOKEN и числовой TELEGRAM_CHAT_ID.")
+        return 1
+    if (stop_event and stop_event.is_set()) or (stop_file and stop_file.exists()):
+        return 0
+    ensure_schema(settings)
+    scope, owner = token_scope(settings.telegram_bot_token), uuid.uuid4().hex
+    stop_event = stop_event or threading.Event()
+    client_owned = client is None
+    client = client or TelegramClient(settings.telegram_bot_token)
+    heartbeat_thread = None
+
+    def stopping():
+        return stop_event.is_set() or bool(stop_file and stop_file.exists())
+
+    def maintain_lease():
+        while not stop_event.wait(HEARTBEAT_SECONDS):
+            if stopping():
+                stop_event.set()
+                return
+            try:
+                with connect(settings) as pulse:
+                    if heartbeat(pulse, scope, owner, int(time.time())):
+                        continue
+            except Exception:
+                pass
+            logger.error("Аренда процесса бота потеряна; опрос остановлен.")
+            stop_event.set()
+            return
+
+    try:
+        with connect(settings) as db:
+            if not acquire_lease(db, scope, owner, int(time.time())):
+                logger.error("Другой процесс уже управляет меню этого бота. Второй опрос не запущен.")
+                return 2
+            heartbeat_thread = threading.Thread(target=maintain_lease, name="telegram-poller-heartbeat", daemon=True)
+            heartbeat_thread.start()
+            try:
+                def bootstrap_call(method):
+                    # Both startup methods are read-only, so a transient network
+                    # failure is safe to retry. The independent heartbeat keeps
+                    # the same lease while waiting for connectivity to recover.
+                    while not stopping():
+                        if not lease_owned(db, scope, owner, int(time.time())):
+                            raise TelegramError("lease_lost")
+                        try:
+                            return client.call(method)
+                        except TelegramError as exc:
+                            if exc.code in {"access_rejected", "polling_conflict", "lease_lost"}:
+                                raise
+                            logger.warning("Подготовка меню Telegram временно недоступна: %s. Повтор после паузы.", exc.code)
+                            for _ in range(min(max(exc.retry_after or 5, 1), 300)):
+                                if stopping():
+                                    return None
+                                stop_event.wait(1)
+                    return None
+
+                webhook = bootstrap_call("getWebhookInfo")
+                if stopping():
+                    return 0
+                if not isinstance(webhook, dict) or webhook.get("url"):
+                    logger.error("У бота установлен webhook или его состояние неизвестно. Опрос не запущен; webhook не изменён.")
+                    return 1
+                identity = bootstrap_call("getMe")
+                if stopping():
+                    return 0
+                bot_username = identity.get("username") if isinstance(identity, dict) else None
+                if not isinstance(bot_username, str) or not re.fullmatch(r"[A-Za-z0-9_]{5,32}", bot_username):
+                    raise TelegramError("identity_unknown")
+                logger.info("Меню бота запущено; разрешён один настроенный чат.")
+                while not stopping():
+                    if not lease_owned(db, scope, owner, int(time.time())):
+                        logger.error("Аренда процесса бота потеряна; опрос остановлен.")
+                        return 2
+                    offset = db.execute("SELECT next_offset FROM telegram_pollers WHERE scope=?", (scope,)).fetchone()[0]
+                    try:
+                        updates = client.call("getUpdates", {"offset": offset, "timeout": POLL_SECONDS, "limit": 20, "allowed_updates": ["message", "callback_query"]})
+                        if not isinstance(updates, list):
+                            raise TelegramError("invalid_response")
+                    except TelegramError as exc:
+                        if exc.code in {"polling_conflict", "access_rejected"}:
+                            logger.error("Опрос бота остановлен: %s. Проверьте отдельные процессы и права токена.", exc.code)
+                            return 1
+                        logger.warning("Опрос Telegram временно недоступен: %s.", exc.code)
+                        for _ in range(exc.retry_after or 5):
+                            if stopping():
+                                break
+                            stop_event.wait(1)
+                        continue
+                    if stopping():
+                        break
+                    # Telegram normally orders updates; sorting avoids dropping a
+                    # lower identifier if a proxy/mock returns a shuffled batch.
+                    valid = [u for u in updates[:20] if isinstance(u, dict) and isinstance(u.get("update_id"), int) and not isinstance(u["update_id"], bool)]
+                    for update in sorted(valid, key=lambda item: item["update_id"]):
+                        if stopping():
+                            break
+                        process_update(settings, db, client, scope, owner, update, bot_username=bot_username)
+                    prune_receipts(db, scope, int(time.time()))
+                return 0
+            finally:
+                stop_event.set()
+                if heartbeat_thread is not None:
+                    heartbeat_thread.join(timeout=2)
+                release_lease(db, scope, owner)
+    except TelegramError as exc:
+        logger.error("Меню бота не запущено: %s. Секреты не журналируются.", exc.code)
+        return 1
+    except Exception:
+        logger.error("Меню бота остановлено из-за внутренней ошибки. Проверьте конфигурацию и доступ к базе.")
+        return 1
+    finally:
+        stop_event.set()
+        if client_owned:
+            client.close()
+
+
+def main():
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+    parser = argparse.ArgumentParser(description="Aéza · Контроль продлений: Telegram-меню сроков и ручного учёта оплаты.")
+    parser.add_argument("--stop-file", type=Path, help="Путь к файлу мягкой остановки; процесс только проверяет его наличие.")
+    args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    stop_event = threading.Event()
+    signal.signal(signal.SIGINT, lambda *_: stop_event.set())
+    signal.signal(signal.SIGTERM, lambda *_: stop_event.set())
+    try:
+        settings = load_settings()
+        initialize(settings)
+        code = run_polling(settings, stop_event=stop_event, stop_file=args.stop_file)
+    except Exception:
+        logger.error("Не удалось запустить меню бота. Проверьте окружение и базу; секреты не выводятся.")
+        code = 1
+    raise SystemExit(code)
+
+
+if __name__ == "__main__":
+    main()

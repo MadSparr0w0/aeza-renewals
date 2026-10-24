@@ -1,0 +1,67 @@
+name: invoice-keeper
+
+services:
+  api:
+    build: .
+    image: invoice-keeper:local
+    env_file:
+      - .env
+    environment:
+      DATABASE_PATH: /app/data/invoice_keeper.db
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - invoice-data:/app/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  worker:
+    image: invoice-keeper:local
+    env_file:
+      - .env
+    environment:
+      DATABASE_PATH: /app/data/invoice_keeper.db
+    command: ["python", "-m", "backend.worker"]
+    volumes:
+      - invoice-data:/app/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      - api
+    stop_grace_period: 45s
+    restart: unless-stopped
+
+  bot:
+    image: invoice-keeper:local
+    env_file:
+      - .env
+    environment:
+      DATABASE_PATH: /app/data/invoice_keeper.db
+    command: ["python", "-m", "backend.telegram_bot"]
+    volumes:
+      - invoice-data:/app/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      - api
+    stop_grace_period: 45s
+    restart: unless-stopped
+
+volumes:
+  invoice-data:

@@ -1,0 +1,26 @@
+# Template only. Install the completed file as:
+# /etc/aeza-renewals/environment, owner root:root, permissions 0600.
+# This file is consumed by systemd EnvironmentFile, not by a shell.
+# Leave no .env in /opt/aeza-renewals/current.
+
+ADMIN_USERNAME=admin
+# Generate with scripts/init_env.py in a secure staging environment.
+# Keep the scrypt hash literal and quoted; never put a plain password here.
+ADMIN_PASSWORD_HASH=''
+# Generate an independent random secret of at least 32 characters per environment.
+APP_SECRET=''
+
+# Replace with the exact HTTPS origin configured at the reverse proxy, no path.
+APP_ORIGIN=https://renewals.example.com
+APP_ALLOWED_ORIGINS=
+COOKIE_SECURE=true
+SESSION_HOURS=12
+TIMEZONE=Europe/Moscow
+# Required absolute path: the source tree is read-only to the service user.
+DATABASE_PATH=/var/lib/aeza-renewals/invoice_keeper.db
+
+# Both values are needed for delivery. Telegram polling also needs a numeric ID.
+TELEGRAM_BOT_TOKEN=''
+TELEGRAM_CHAT_ID=''
+# Optional, explicit password for seed only; no demo password is supplied by default.
+DEMO_USER_PASSWORD=''

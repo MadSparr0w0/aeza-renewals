@@ -1,0 +1,1307 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Aéza · API контроля продлений",
+    "description": "Aéza · Контроль продлений: ежемесячные сроки серверов и инфраструктурных услуг, история ручных отметок оплаты, две роли и напоминания в Telegram. Данные вносятся командой вручную. Отметка оплаты не проводит платёж, создание записи не покупает услугу, а прекращение учёта не выключает и не удаляет сервер. Реальная оплата и управление услугами выполняются отдельно в кабинете Aéza. Сначала войдите в нашу веб-панель и откройте документацию в том же браузере: защищённый сессионный cookie HttpOnly отправляется автоматически. Для изменяющих запросов скопируйте csrf_token из ответа GET /api/v1/auth/me в поле csrfHeader окна «Авторизация». Копировать или вводить сессионный cookie не нужно. Запросы из браузера должны исходить с разрешённого адреса приложения.",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/api/v1/health": {
+      "get": {
+        "tags": [
+          "Система"
+        ],
+        "summary": "Проверить состояние приложения",
+        "description": "Проверяет доступность HTTP-сервера. Не требует входа и не раскрывает финансовые данные.",
+        "operationId": "health_api_v1_health_get",
+        "responses": {
+          "200": {
+            "description": "Запрос выполнен успешно.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/auth/login": {
+      "post": {
+        "tags": [
+          "Авторизация"
+        ],
+        "summary": "Войти в систему",
+        "description": "Проверяет локальную учётную запись панели контроля продлений, устанавливает защищённый сессионный cookie и возвращает пользователя вместе с csrf_token. Это отдельный вход, он не авторизует пользователя в кабинете провайдера Aéza. Повторные неудачные попытки входа ограничены.",
+        "operationId": "login_api_v1_auth_login_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Login"
+              }
+            }
+          },
+          "required": true,
+          "description": "Поля запроса в формате application/json. Неизвестные поля не принимаются."
+        },
+        "responses": {
+          "200": {
+            "description": "Запрос выполнен успешно.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Данные запроса не прошли проверку. Исправьте указанные поля.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/auth/me": {
+      "get": {
+        "tags": [
+          "Авторизация"
+        ],
+        "summary": "Получить текущего пользователя",
+        "description": "Возвращает данные вошедшего пользователя и csrf_token для изменяющих запросов. Пароли и сессионный токен в ответ не передаются.",
+        "operationId": "me_api_v1_auth_me_get",
+        "responses": {
+          "200": {
+            "description": "Запрос выполнен успешно.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Сессия отсутствует, истекла или была завершена. Войдите снова."
+          },
+          "403": {
+            "description": "Недостаточно прав, запрещённый адрес запроса или недействительный CSRF-токен."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auth/logout": {
+      "post": {
+        "tags": [
+          "Авторизация"
+        ],
+        "summary": "Завершить текущую сессию",
+        "description": "Отзывает серверную сессию и удаляет сессионный cookie браузера. Требуется действующий csrf_token в заголовке X-CSRF-Token.",
+        "operationId": "logout_api_v1_auth_logout_post",
+        "responses": {
+          "204": {
+            "description": "Действие выполнено. Тело ответа отсутствует."
+          },
+          "401": {
+            "description": "Сессия отсутствует, истекла или была завершена. Войдите снова."
+          },
+          "403": {
+            "description": "Недостаточно прав, запрещённый адрес запроса или недействительный CSRF-токен."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ]
+      }
+    },
+    "/api/v1/recurring-payments": {
+      "get": {
+        "tags": [
+          "Регулярные платежи"
+        ],
+        "summary": "Получить регулярные платежи",
+        "description": "Возвращает правила ежемесячного учёта продлений серверов и услуг. Это записи команды, а не сведения о фактическом состоянии серверов у провайдера. По умолчанию показаны действующие правила учёта; прекращённые можно включить отдельным параметром.",
+        "operationId": "recurring_list_api_v1_recurring_payments_get",
+        "parameters": [
+          {
+            "name": "include_inactive",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "title": "Включить прекращённые платежи",
+              "description": "true — добавить прекращённые регулярные платежи; false — показать только действующие.",
+              "default": false
+            },
+            "description": "true — добавить прекращённые регулярные платежи; false — показать только действующие."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Запрос выполнен успешно.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Данные запроса не прошли проверку. Исправьте указанные поля.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Сессия отсутствует, истекла или была завершена. Войдите снова."
+          },
+          "403": {
+            "description": "Недостаточно прав, запрещённый адрес запроса или недействительный CSRF-токен."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "Регулярные платежи"
+        ],
+        "summary": "Добавить регулярный платёж",
+        "description": "Только администратор. Добавляет ручной учёт ежемесячного продления и отдельный первый период оплаты. Услуга у провайдера не заказывается и не покупается. Напоминание ставится в очередь за три дня до срока или сразу, если до срока осталось меньше трёх дней.",
+        "operationId": "recurring_create_api_v1_recurring_payments_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecurringCreate"
+              }
+            }
+          },
+          "description": "Поля запроса в формате application/json. Неизвестные поля не принимаются."
+        },
+        "responses": {
+          "201": {
+            "description": "Запись создана.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Данные запроса не прошли проверку. Исправьте указанные поля.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Сессия отсутствует, истекла или была завершена. Войдите снова."
+          },
+          "403": {
+            "description": "Недостаточно прав, запрещённый адрес запроса или недействительный CSRF-токен."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ]
+      }
+    },
+    "/api/v1/recurring-payments/{payment_id}": {
+      "patch": {
+        "tags": [
+          "Регулярные платежи"
+        ],
+        "summary": "Изменить условия серии со следующего месяца",
+        "description": "Только администратор. Все три поля обязательны: название, сумма и валюта. Новые условия применяются к серии и её неоплаченным периодам со сроком начиная с первого числа следующего месяца в общем часовом поясе. Текущий месяц, прошлые и оплаченные будущие периоды сохраняются полностью; исходный график и идентификаторы периодов не меняются. Напоминания не сбрасываются и повторно не отправляются. Ответ содержит effective_from — дату начала новых условий. Одинаковые после нормализации значения не создают событие журнала.",
+        "operationId": "recurring_update_api_v1_recurring_payments__payment_id__patch",
+        "parameters": [
+          {
+            "name": "payment_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Идентификатор регулярного платежа",
+              "description": "Числовой идентификатор активной серии, условия которой нужно изменить."
+            },
+            "description": "Числовой идентификатор активной серии, условия которой нужно изменить."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecurringUpdate"
+              }
+            }
+          },
+          "description": "Поля запроса в формате application/json. Неизвестные поля не принимаются."
+        },
+        "responses": {
+          "200": {
+            "description": "Запрос выполнен успешно.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Регулярный платёж не найден."
+          },
+          "409": {
+            "description": "Платёж прекращён, его прошлые или текущие периоды ещё не созданы либо напоминание затрагиваемого будущего периода уже отправляется. Изменения не выполнены. Для создания пропущенных периодов сначала обновите список платежей."
+          },
+          "422": {
+            "description": "Данные запроса не прошли проверку. Исправьте указанные поля.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Сессия отсутствует, истекла или была завершена. Войдите снова."
+          },
+          "403": {
+            "description": "Недостаточно прав, запрещённый адрес запроса или недействительный CSRF-токен."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "Регулярные платежи"
+        ],
+        "summary": "Прекратить регулярный платёж",
+        "description": "Только администратор. Прекращает учёт новых периодов и напоминания, сохраняя ранее созданные периоды, сроки и отметки оплаты. Этот метод не выключает и не удаляет реальный сервер или услугу у провайдера.",
+        "operationId": "recurring_delete_api_v1_recurring_payments__payment_id__delete",
+        "parameters": [
+          {
+            "name": "payment_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Идентификатор регулярного платежа",
+              "description": "Числовой идентификатор платежа из общего списка."
+            },
+            "description": "Числовой идентификатор платежа из общего списка."
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Действие выполнено. Тело ответа отсутствует."
+          },
+          "422": {
+            "description": "Данные запроса не прошли проверку. Исправьте указанные поля.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Сессия отсутствует, истекла или была завершена. Войдите снова."
+          },
+          "403": {
+            "description": "Недостаточно прав, запрещённый адрес запроса или недействительный CSRF-токен."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ]
+      }
+    },
+    "/api/v1/payment-occurrences": {
+      "get": {
+        "tags": [
+          "Периоды оплаты"
+        ],
+        "summary": "Получить периоды оплаты",
+        "description": "Возвращает отдельные периоды с суммой, валютой, сроком, отметкой и фактической датой оплаты. Просрочка пересчитывается в общем часовом поясе. История сохраняется независимо от следующего периода.",
+        "operationId": "occurrences_api_v1_payment_occurrences_get",
+        "parameters": [
+          {
+            "name": "month",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Месяц",
+              "description": "Фильтр по месяцу срока оплаты в формате YYYY-MM. Без параметра возвращаются все созданные периоды."
+            },
+            "description": "Фильтр по месяцу срока оплаты в формате YYYY-MM. Без параметра возвращаются все созданные периоды."
+          },
+          {
+            "name": "currency",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Валюта",
+              "description": "Фильтр по валюте: RUB — рубли, USD — доллары, EUR — евро."
+            },
+            "description": "Фильтр по валюте: RUB — рубли, USD — доллары, EUR — евро."
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Статус оплаты",
+              "description": "paid — оплачено, unpaid — не оплачено, overdue — просрочено, pending — срок ещё не прошёл, all — все статусы."
+            },
+            "description": "paid — оплачено, unpaid — не оплачено, overdue — просрочено, pending — срок ещё не прошёл, all — все статусы."
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 160
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Поиск по названию",
+              "description": "Текст для поиска внутри названия платежа."
+            },
+            "description": "Текст для поиска внутри названия платежа."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Запрос выполнен успешно.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Данные запроса не прошли проверку. Исправьте указанные поля.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Сессия отсутствует, истекла или была завершена. Войдите снова."
+          },
+          "403": {
+            "description": "Недостаточно прав, запрещённый адрес запроса или недействительный CSRF-токен."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/v1/payment-occurrences/{occurrence_id}": {
+      "get": {
+        "tags": [
+          "Периоды оплаты"
+        ],
+        "summary": "Получить конкретный период оплаты",
+        "description": "Возвращает данные одного периода, его фактическую дату оплаты и актуальную просрочку в календарных днях.",
+        "operationId": "occurrence_get_api_v1_payment_occurrences__occurrence_id__get",
+        "parameters": [
+          {
+            "name": "occurrence_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Идентификатор периода оплаты",
+              "description": "Числовой идентификатор отдельного периода из списка оплат."
+            },
+            "description": "Числовой идентификатор отдельного периода из списка оплат."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Запрос выполнен успешно.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Данные запроса не прошли проверку. Исправьте указанные поля.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Сессия отсутствует, истекла или была завершена. Войдите снова."
+          },
+          "403": {
+            "description": "Недостаточно прав, запрещённый адрес запроса или недействительный CSRF-токен."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "Периоды оплаты"
+        ],
+        "summary": "Изменить отметку или дату оплаты",
+        "description": "Администратор и обычный пользователь могут вручную подтвердить или отменить отметку оплаты периода и исправить фактическую дату. Это внутренний учёт команды, а не проведение банковского платежа или подтверждение биллинга Aéza. Отмена очищает дату; исправление пересчитывает просрочку. Исходный срок и другие периоды не меняются.",
+        "operationId": "occurrence_patch_api_v1_payment_occurrences__occurrence_id__patch",
+        "parameters": [
+          {
+            "name": "occurrence_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Идентификатор периода оплаты",
+              "description": "Числовой идентификатор периода, отметку которого нужно изменить."
+            },
+            "description": "Числовой идентификатор периода, отметку которого нужно изменить."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OccurrencePatch"
+              }
+            }
+          },
+          "description": "Поля запроса в формате application/json. Неизвестные поля не принимаются."
+        },
+        "responses": {
+          "200": {
+            "description": "Запрос выполнен успешно.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Данные запроса не прошли проверку. Исправьте указанные поля.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Сессия отсутствует, истекла или была завершена. Войдите снова."
+          },
+          "403": {
+            "description": "Недостаточно прав, запрещённый адрес запроса или недействительный CSRF-токен."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ]
+      }
+    },
+    "/api/v1/payments/summary": {
+      "get": {
+        "tags": [
+          "Итоги"
+        ],
+        "summary": "Получить итоги по валютам",
+        "description": "Возвращает плановые, оплаченные, неоплаченные и просроченные суммы, а также количество периодов. RUB, USD и EUR считаются отдельно, без конвертации. Суммы передаются строками с двумя знаками после запятой.",
+        "operationId": "summary_api_v1_payments_summary_get",
+        "parameters": [
+          {
+            "name": "month",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Месяц итогов",
+              "description": "Месяц срока оплаты в формате YYYY-MM. Без параметра итоги включают все созданные периоды."
+            },
+            "description": "Месяц срока оплаты в формате YYYY-MM. Без параметра итоги включают все созданные периоды."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Запрос выполнен успешно.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Данные запроса не прошли проверку. Исправьте указанные поля.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Сессия отсутствует, истекла или была завершена. Войдите снова."
+          },
+          "403": {
+            "description": "Недостаточно прав, запрещённый адрес запроса или недействительный CSRF-токен."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/v1/users": {
+      "get": {
+        "tags": [
+          "Пользователи"
+        ],
+        "summary": "Получить список пользователей",
+        "description": "Только администратор. Возвращает логины, имена и роли. Конфигурационная учётная запись администратора помечена как управляемая через окружение.",
+        "operationId": "users_api_v1_users_get",
+        "responses": {
+          "200": {
+            "description": "Запрос выполнен успешно.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Сессия отсутствует, истекла или была завершена. Войдите снова."
+          },
+          "403": {
+            "description": "Недостаточно прав, запрещённый адрес запроса или недействительный CSRF-токен."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "Пользователи"
+        ],
+        "summary": "Создать обычного пользователя",
+        "description": "Только администратор. Создаёт пользователя с правом просмотра платежей и изменения оплаты. Создание администратора через этот метод запрещено.",
+        "operationId": "user_create_api_v1_users_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserCreate"
+              }
+            }
+          },
+          "required": true,
+          "description": "Поля запроса в формате application/json. Неизвестные поля не принимаются."
+        },
+        "responses": {
+          "201": {
+            "description": "Запись создана.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Данные запроса не прошли проверку. Исправьте указанные поля.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Сессия отсутствует, истекла или была завершена. Войдите снова."
+          },
+          "403": {
+            "description": "Недостаточно прав, запрещённый адрес запроса или недействительный CSRF-токен."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ]
+      }
+    },
+    "/api/v1/users/{user_id}": {
+      "patch": {
+        "tags": [
+          "Пользователи"
+        ],
+        "summary": "Изменить обычного пользователя",
+        "description": "Только администратор. Изменяет переданные логин, имя или пароль и завершает все сессии пользователя. Учётную запись администратора можно изменить только через окружение.",
+        "operationId": "user_patch_api_v1_users__user_id__patch",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Идентификатор пользователя",
+              "description": "Числовой идентификатор обычного пользователя."
+            },
+            "description": "Числовой идентификатор обычного пользователя."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserPatch"
+              }
+            }
+          },
+          "description": "Поля запроса в формате application/json. Неизвестные поля не принимаются."
+        },
+        "responses": {
+          "200": {
+            "description": "Запрос выполнен успешно.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Данные запроса не прошли проверку. Исправьте указанные поля.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Сессия отсутствует, истекла или была завершена. Войдите снова."
+          },
+          "403": {
+            "description": "Недостаточно прав, запрещённый адрес запроса или недействительный CSRF-токен."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "Пользователи"
+        ],
+        "summary": "Удалить обычного пользователя",
+        "description": "Только администратор. Удаляет обычного пользователя и отзывает его сессии. История платежей сохраняется. Удалить администратора этим методом нельзя.",
+        "operationId": "user_delete_api_v1_users__user_id__delete",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Идентификатор пользователя",
+              "description": "Числовой идентификатор удаляемого обычного пользователя."
+            },
+            "description": "Числовой идентификатор удаляемого обычного пользователя."
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Действие выполнено. Тело ответа отсутствует."
+          },
+          "422": {
+            "description": "Данные запроса не прошли проверку. Исправьте указанные поля.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Сессия отсутствует, истекла или была завершена. Войдите снова."
+          },
+          "403": {
+            "description": "Недостаточно прав, запрещённый адрес запроса или недействительный CSRF-токен."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ]
+      }
+    },
+    "/api/v1/settings": {
+      "get": {
+        "tags": [
+          "Система"
+        ],
+        "summary": "Получить общие настройки",
+        "description": "Возвращает название продукта, режим ручного учёта manual, общий часовой пояс, сегодняшнюю дату, срок напоминания и признак настройки Telegram. Режим manual не означает подключение к реальному биллингу Aéza. Секреты, пароль и токен бота не передаются.",
+        "operationId": "settings_get_api_v1_settings_get",
+        "responses": {
+          "200": {
+            "description": "Запрос выполнен успешно.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Сессия отсутствует, истекла или была завершена. Войдите снова."
+          },
+          "403": {
+            "description": "Недостаточно прав, запрещённый адрес запроса или недействительный CSRF-токен."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/v1/activity": {
+      "get": {
+        "tags": [
+          "Система"
+        ],
+        "summary": "Получить журнал действий",
+        "description": "Только администратор. Возвращает последние события входа, изменения платежей и управления пользователями. Пароли и токены в журнале не сохраняются.",
+        "operationId": "activity_api_v1_activity_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Количество событий",
+              "description": "Сколько последних событий вернуть: от 1 до 100, по умолчанию 30.",
+              "default": 30
+            },
+            "description": "Сколько последних событий вернуть: от 1 до 100, по умолчанию 30."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Запрос выполнен успешно.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Данные запроса не прошли проверку. Исправьте указанные поля.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Сессия отсутствует, истекла или была завершена. Войдите снова."
+          },
+          "403": {
+            "description": "Недостаточно прав, запрещённый адрес запроса или недействительный CSRF-токен."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/v1/reminders": {
+      "get": {
+        "tags": [
+          "Система"
+        ],
+        "summary": "Проверить очередь напоминаний",
+        "description": "Только администратор. Возвращает состояние и число попыток отправки последних 100 напоминаний. Неопределённая доставка имеет статус unknown: автоматический повтор отключён до ручной проверки чата.",
+        "operationId": "reminders_api_v1_reminders_get",
+        "responses": {
+          "200": {
+            "description": "Запрос выполнен успешно.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Сессия отсутствует, истекла или была завершена. Войдите снова."
+          },
+          "403": {
+            "description": "Недостаточно прав, запрещённый адрес запроса или недействительный CSRF-токен."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Сведения об ошибках"
+          }
+        },
+        "type": "object",
+        "title": "Ошибка проверки запроса"
+      },
+      "Login": {
+        "properties": {
+          "username": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Логин",
+            "description": "Логин администратора из окружения или обычного пользователя."
+          },
+          "password": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Пароль",
+            "description": "Пароль учётной записи. Не сохраняется в документации и не возвращается в ответе."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "username",
+          "password"
+        ],
+        "title": "Данные для входа"
+      },
+      "OccurrencePatch": {
+        "properties": {
+          "is_paid": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Отметка об оплате",
+            "description": "true — оплачено, false — не оплачено. Отмена оплаты очищает фактическую дату только этого периода."
+          },
+          "paid_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Фактическая дата оплаты",
+            "description": "Дата в формате YYYY-MM-DD, не позднее сегодняшней. Если при подтверждении дата не указана, используется сегодня. Исправление даты пересчитывает просрочку."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "Изменение оплаты периода"
+      },
+      "RecurringCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Название платежа",
+            "description": "Понятное команде название расхода, например аренда офиса."
+          },
+          "amount": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "Сумма",
+            "description": "От 0.01 до 999999999.99, не более двух знаков после запятой. Для точного ввода рекомендуется строка, например 1250.50."
+          },
+          "currency": {
+            "type": "string",
+            "enum": [
+              "RUB",
+              "USD",
+              "EUR"
+            ],
+            "title": "Валюта",
+            "description": "RUB — рубли, USD — доллары, EUR — евро. Валюты учитываются отдельно."
+          },
+          "next_due_date": {
+            "type": "string",
+            "format": "date",
+            "title": "Ближайший срок оплаты",
+            "description": "Календарная дата в формате YYYY-MM-DD в общем часовом поясе приложения; от 2000 года до пяти лет вперёд."
+          },
+          "frequency": {
+            "type": "string",
+            "const": "monthly",
+            "title": "Периодичность",
+            "description": "monthly — ежемесячно. Исходное число месяца сохраняется; в коротком месяце выбирается последний день.",
+            "default": "monthly"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "amount",
+          "currency",
+          "next_due_date"
+        ],
+        "title": "Новый регулярный платёж"
+      },
+      "RecurringUpdate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Название платежа",
+            "description": "Новое название серии и её неоплаченных периодов начиная со следующего месяца. История сохраняется."
+          },
+          "amount": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "Сумма",
+            "description": "Новая сумма от 0.01 до 999999999.99, не более двух знаков после запятой. Для точного ввода рекомендуется строка. Применяется с первого числа следующего месяца."
+          },
+          "currency": {
+            "type": "string",
+            "enum": [
+              "RUB",
+              "USD",
+              "EUR"
+            ],
+            "title": "Валюта",
+            "description": "Новая валюта RUB, USD или EUR. Текущий месяц, прошлые и уже оплаченные периоды сохраняют прежние условия."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "amount",
+          "currency"
+        ],
+        "title": "Новые условия регулярного платежа"
+      },
+      "UserCreate": {
+        "properties": {
+          "username": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 3,
+            "pattern": "^[A-Za-z0-9_.@-]+$",
+            "title": "Логин",
+            "description": "Уникальный логин: латинские буквы, цифры и символы _, -, ., @."
+          },
+          "full_name": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Имя пользователя",
+            "description": "Имя, отображаемое в панели и журнале действий."
+          },
+          "password": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 12,
+            "title": "Пароль",
+            "description": "От 12 до 256 символов. Сохраняется только защищённый хеш; пароль в ответ не попадает."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "username",
+          "full_name",
+          "password"
+        ],
+        "title": "Новый пользователь"
+      },
+      "UserPatch": {
+        "properties": {
+          "username": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64,
+                "minLength": 3,
+                "pattern": "^[A-Za-z0-9_.@-]+$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Новый логин",
+            "description": "Латинские буквы, цифры и символы _, -, ., @. Если поле не передано, логин сохраняется."
+          },
+          "full_name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Новое имя пользователя",
+            "description": "Отображаемое имя. Если поле не передано, имя сохраняется."
+          },
+          "password": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 256,
+                "minLength": 12
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Новый пароль",
+            "description": "От 12 до 256 символов. Изменение пользователя завершает все его активные сессии."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "Изменение пользователя"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Расположение ошибки"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Сообщение об ошибке"
+          },
+          "type": {
+            "type": "string",
+            "title": "Тип ошибки"
+          },
+          "input": {
+            "title": "Исходные данные"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Дополнительные сведения"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "Ошибка поля запроса"
+      }
+    },
+    "securitySchemes": {
+      "sessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "ik_session",
+        "description": "Защищённый сессионный cookie HttpOnly устанавливается при входе и отправляется браузером автоматически. Сначала войдите через веб-панель; вводить значение вручную не нужно."
+      },
+      "csrfHeader": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-CSRF-Token",
+        "description": "Скопируйте csrf_token из ответа входа или GET /api/v1/auth/me. Токен обязателен для изменяющих запросов POST, PATCH и DELETE после входа."
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Система",
+      "description": "Состояние приложения, общие настройки и журнал действий."
+    },
+    {
+      "name": "Авторизация",
+      "description": "Вход, проверка текущей учётной записи и завершение сессии."
+    },
+    {
+      "name": "Регулярные платежи",
+      "description": "Ручной учёт ежемесячных продлений серверов и услуг с сохранением истории."
+    },
+    {
+      "name": "Периоды оплаты",
+      "description": "Сроки, ручные отметки, фактические даты оплаты и просрочка отдельных периодов."
+    },
+    {
+      "name": "Итоги",
+      "description": "Плановые, оплаченные, неоплаченные и просроченные суммы отдельно по валютам."
+    },
+    {
+      "name": "Пользователи",
+      "description": "Управление обычными пользователями. Доступно только администратору."
+    }
+  ]
+}
