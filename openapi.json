@@ -282,6 +282,57 @@
       }
     },
     "/api/v1/recurring-payments/{payment_id}": {
+      "get": {
+        "tags": [
+          "Регулярные платежи"
+        ],
+        "summary": "Получить условия одного платежа",
+        "operationId": "recurring_get_api_v1_recurring_payments__payment_id__get",
+        "parameters": [
+          {
+            "name": "payment_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Идентификатор платежа"
+            },
+            "description": "Идентификатор платежа. Учитываются права текущего пользователя."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Запрос выполнен успешно.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Данные запроса не прошли проверку. Исправьте указанные поля.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Сессия отсутствует, истекла или была завершена. Войдите снова."
+          },
+          "403": {
+            "description": "Недостаточно прав, запрещённый адрес запроса или недействительный CSRF-токен."
+          }
+        },
+        "description": "Получить условия одного платежа. Доступ к финансовым записям ограничен владельцем или администратором; ответы списков ограничены размером страницы.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      },
       "patch": {
         "tags": [
           "Регулярные платежи"
@@ -397,6 +448,289 @@
           {
             "sessionCookie": [],
             "csrfHeader": []
+          }
+        ]
+      }
+    },
+    "/api/v1/payment-occurrences/page": {
+      "get": {
+        "tags": [
+          "Периоды оплаты"
+        ],
+        "summary": "Платежи страницами с серверными фильтрами",
+        "operationId": "occurrence_page_api_v1_payment_occurrences_page_get",
+        "parameters": [
+          {
+            "name": "month",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Месяц"
+            },
+            "description": "Месяц. Учитываются права текущего пользователя."
+          },
+          {
+            "name": "currency",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Валюта"
+            },
+            "description": "Валюта. Учитываются права текущего пользователя."
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Статус"
+            },
+            "description": "Статус. Учитываются права текущего пользователя."
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 160
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Поиск"
+            },
+            "description": "Поиск. Учитываются права текущего пользователя."
+          },
+          {
+            "name": "day",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Дата"
+            },
+            "description": "Дата. Учитываются права текущего пользователя."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 30,
+              "title": "Размер страницы"
+            },
+            "description": "Размер страницы. Учитываются права текущего пользователя."
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 10000000,
+              "minimum": 0,
+              "default": 0,
+              "title": "Смещение"
+            },
+            "description": "Смещение. Учитываются права текущего пользователя."
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "due_date",
+              "title": "Сортировка"
+            },
+            "description": "Сортировка. Учитываются права текущего пользователя."
+          },
+          {
+            "name": "descending",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Обратный порядок"
+            },
+            "description": "Обратный порядок. Учитываются права текущего пользователя."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Запрос выполнен успешно.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Данные запроса не прошли проверку. Исправьте указанные поля.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Сессия отсутствует, истекла или была завершена. Войдите снова."
+          },
+          "403": {
+            "description": "Недостаточно прав, запрещённый адрес запроса или недействительный CSRF-токен."
+          }
+        },
+        "description": "Платежи страницами с серверными фильтрами. Доступ к финансовым записям ограничен владельцем или администратором; ответы списков ограничены размером страницы.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/v1/payments/calendar": {
+      "get": {
+        "tags": [
+          "Итоги"
+        ],
+        "summary": "Итоги календаря по дням без выгрузки всех платежей",
+        "operationId": "calendar_summary_api_v1_payments_calendar_get",
+        "parameters": [
+          {
+            "name": "month",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Месяц"
+            },
+            "description": "Месяц. Учитываются права текущего пользователя."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Запрос выполнен успешно.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Данные запроса не прошли проверку. Исправьте указанные поля.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Сессия отсутствует, истекла или была завершена. Войдите снова."
+          },
+          "403": {
+            "description": "Недостаточно прав, запрещённый адрес запроса или недействительный CSRF-токен."
+          }
+        },
+        "description": "Итоги календаря по дням без выгрузки всех платежей. Доступ к финансовым записям ограничен владельцем или администратором; ответы списков ограничены размером страницы.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/v1/payments/insights": {
+      "get": {
+        "tags": [
+          "Итоги"
+        ],
+        "summary": "Ближайшие расходы, возможные дубликаты и рост цены",
+        "operationId": "payment_insights_api_v1_payments_insights_get",
+        "parameters": [
+          {
+            "name": "month",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Месяц"
+            },
+            "description": "Месяц. Учитываются права текущего пользователя."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Запрос выполнен успешно.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Данные запроса не прошли проверку. Исправьте указанные поля.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Сессия отсутствует, истекла или была завершена. Войдите снова."
+          },
+          "403": {
+            "description": "Недостаточно прав, запрещённый адрес запроса или недействительный CSRF-токен."
+          }
+        },
+        "description": "Ближайшие расходы, возможные дубликаты и рост цены. Доступ к финансовым записям ограничен владельцем или администратором; ответы списков ограничены размером страницы.",
+        "security": [
+          {
+            "sessionCookie": []
           }
         ]
       }
@@ -696,6 +1030,87 @@
         ]
       }
     },
+    "/api/v1/users/page": {
+      "get": {
+        "tags": [
+          "Пользователи"
+        ],
+        "summary": "Участники страницами и поиск ответственного",
+        "operationId": "users_page_api_v1_users_page_get",
+        "parameters": [
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 100,
+              "default": "",
+              "title": "Поиск"
+            },
+            "description": "Поиск. Учитываются права текущего пользователя."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 30,
+              "title": "Размер страницы"
+            },
+            "description": "Размер страницы. Учитываются права текущего пользователя."
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 10000000,
+              "minimum": 0,
+              "default": 0,
+              "title": "Смещение"
+            },
+            "description": "Смещение. Учитываются права текущего пользователя."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Запрос выполнен успешно.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Данные запроса не прошли проверку. Исправьте указанные поля.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Сессия отсутствует, истекла или была завершена. Войдите снова."
+          },
+          "403": {
+            "description": "Недостаточно прав, запрещённый адрес запроса или недействительный CSRF-токен."
+          }
+        },
+        "description": "Участники страницами и поиск ответственного. Доступ к финансовым записям ограничен владельцем или администратором; ответы списков ограничены размером страницы.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
     "/api/v1/users": {
       "get": {
         "tags": [
@@ -774,6 +1189,87 @@
           {
             "sessionCookie": [],
             "csrfHeader": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admins/page": {
+      "get": {
+        "tags": [
+          "Пользователи"
+        ],
+        "summary": "Отдельные администраторы страницами",
+        "operationId": "admins_page_api_v1_admins_page_get",
+        "parameters": [
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 100,
+              "default": "",
+              "title": "Поиск"
+            },
+            "description": "Поиск. Учитываются права текущего пользователя."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 30,
+              "title": "Размер страницы"
+            },
+            "description": "Размер страницы. Учитываются права текущего пользователя."
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 10000000,
+              "minimum": 0,
+              "default": 0,
+              "title": "Смещение"
+            },
+            "description": "Смещение. Учитываются права текущего пользователя."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Запрос выполнен успешно.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Данные запроса не прошли проверку. Исправьте указанные поля.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Сессия отсутствует, истекла или была завершена. Войдите снова."
+          },
+          "403": {
+            "description": "Недостаточно прав, запрещённый адрес запроса или недействительный CSRF-токен."
+          }
+        },
+        "description": "Отдельные администраторы страницами. Доступ к финансовым записям ограничен владельцем или администратором; ответы списков ограничены размером страницы.",
+        "security": [
+          {
+            "sessionCookie": []
           }
         ]
       }
@@ -998,6 +1494,190 @@
             "description": "Недостаточно прав, запрещённый адрес запроса или недействительный CSRF-токен."
           }
         },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/v1/activity/page": {
+      "get": {
+        "tags": [
+          "Система"
+        ],
+        "summary": "Журнал страницами с поиском",
+        "operationId": "activity_page_api_v1_activity_page_get",
+        "parameters": [
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 160,
+              "default": "",
+              "title": "Поиск"
+            },
+            "description": "Поиск. Учитываются права текущего пользователя."
+          },
+          {
+            "name": "category",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "all",
+              "title": "Категория"
+            },
+            "description": "Категория. Учитываются права текущего пользователя."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 30,
+              "title": "Размер страницы"
+            },
+            "description": "Размер страницы. Учитываются права текущего пользователя."
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 10000000,
+              "minimum": 0,
+              "default": 0,
+              "title": "Смещение"
+            },
+            "description": "Смещение. Учитываются права текущего пользователя."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Запрос выполнен успешно.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Данные запроса не прошли проверку. Исправьте указанные поля.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Сессия отсутствует, истекла или была завершена. Войдите снова."
+          },
+          "403": {
+            "description": "Недостаточно прав, запрещённый адрес запроса или недействительный CSRF-токен."
+          }
+        },
+        "description": "Журнал страницами с поиском. Доступ к финансовым записям ограничен владельцем или администратором; ответы списков ограничены размером страницы.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/v1/reminders/page": {
+      "get": {
+        "tags": [
+          "Система"
+        ],
+        "summary": "Очередь страницами по состоянию и названию",
+        "operationId": "reminders_page_api_v1_reminders_page_get",
+        "parameters": [
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 160,
+              "default": "",
+              "title": "Поиск"
+            },
+            "description": "Поиск. Учитываются права текущего пользователя."
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "all",
+              "title": "Состояние"
+            },
+            "description": "Состояние. Учитываются права текущего пользователя."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 30,
+              "title": "Размер страницы"
+            },
+            "description": "Размер страницы. Учитываются права текущего пользователя."
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 10000000,
+              "minimum": 0,
+              "default": 0,
+              "title": "Смещение"
+            },
+            "description": "Смещение. Учитываются права текущего пользователя."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Запрос выполнен успешно.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Данные запроса не прошли проверку. Исправьте указанные поля.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Сессия отсутствует, истекла или была завершена. Войдите снова."
+          },
+          "403": {
+            "description": "Недостаточно прав, запрещённый адрес запроса или недействительный CSRF-токен."
+          }
+        },
+        "description": "Очередь страницами по состоянию и названию. Доступ к финансовым записям ограничен владельцем или администратором; ответы списков ограничены размером страницы.",
         "security": [
           {
             "sessionCookie": []
@@ -1309,6 +1989,86 @@
         "security": []
       }
     },
+    "/api/v1/telegram/destinations": {
+      "get": {
+        "tags": [
+          "Система"
+        ],
+        "summary": "Все группы для уведомлений",
+        "description": "Администратор получает выбранные группы только своей команды. Управление группами доступно в личном кабинете Telegram.",
+        "operationId": "destinations_api_v1_telegram_destinations_get",
+        "responses": {
+          "200": {
+            "description": "Запрос выполнен успешно.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Сессия отсутствует, истекла или была завершена. Войдите снова."
+          },
+          "403": {
+            "description": "Недостаточно прав, запрещённый адрес запроса или недействительный CSRF-токен."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/v1/telegram/destinations/{chat_id}": {
+      "delete": {
+        "tags": [
+          "Система"
+        ],
+        "summary": "Отключить одну группу",
+        "description": "Администратор отключает одну выбранную группу своей команды. Отправленные и неоднозначные доставки сохраняются. Требуется CSRF.",
+        "operationId": "remove_destination_api_v1_telegram_destinations__chat_id__delete",
+        "parameters": [
+          {
+            "name": "chat_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Идентификатор группы"
+            },
+            "description": "Идентификатор группы. Учитываются права текущего пользователя."
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Действие выполнено. Тело ответа отсутствует."
+          },
+          "422": {
+            "description": "Данные запроса не прошли проверку. Исправьте указанные поля.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Сессия отсутствует, истекла или была завершена. Войдите снова."
+          },
+          "403": {
+            "description": "Недостаточно прав, запрещённый адрес запроса или недействительный CSRF-токен."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ]
+      }
+    },
     "/api/v1/telegram/connection": {
       "get": {
         "tags": [
@@ -1449,10 +2209,356 @@
           }
         ]
       }
+    },
+    "/api/v1/auth/telegram/config": {
+      "get": {
+        "tags": [
+          "Авторизация"
+        ],
+        "summary": "Доступность входа через Telegram",
+        "operationId": "config_api_v1_auth_telegram_config_get",
+        "responses": {
+          "200": {
+            "description": "Запрос выполнен успешно.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "description": "Доступность входа через Telegram. Доступ к финансовым записям ограничен владельцем или администратором; ответы списков ограничены размером страницы.",
+        "security": []
+      }
+    },
+    "/api/v1/auth/telegram/identity": {
+      "get": {
+        "tags": [
+          "Авторизация"
+        ],
+        "summary": "Моя привязка Telegram",
+        "operationId": "identity_api_v1_auth_telegram_identity_get",
+        "responses": {
+          "200": {
+            "description": "Запрос выполнен успешно.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Сессия отсутствует, истекла или была завершена. Войдите снова."
+          },
+          "403": {
+            "description": "Недостаточно прав, запрещённый адрес запроса или недействительный CSRF-токен."
+          }
+        },
+        "description": "Моя привязка Telegram. Доступ к финансовым записям ограничен владельцем или администратором; ответы списков ограничены размером страницы.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "Авторизация"
+        ],
+        "summary": "Отключить вход через Telegram",
+        "operationId": "unlink_api_v1_auth_telegram_identity_delete",
+        "responses": {
+          "204": {
+            "description": "Действие выполнено. Тело ответа отсутствует."
+          },
+          "401": {
+            "description": "Сессия отсутствует, истекла или была завершена. Войдите снова."
+          },
+          "403": {
+            "description": "Недостаточно прав, запрещённый адрес запроса или недействительный CSRF-токен."
+          }
+        },
+        "description": "Отключить вход через Telegram. Доступ к финансовым записям ограничен владельцем или администратором; ответы списков ограничены размером страницы.",
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auth/telegram/bot-link": {
+      "get": {
+        "tags": [
+          "Авторизация"
+        ],
+        "summary": "Проверить приглашение к привязке из бота",
+        "operationId": "bot_link_info_api_v1_auth_telegram_bot_link_get",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Одноразовый токен"
+            },
+            "description": "Одноразовый токен. Учитываются права текущего пользователя."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Запрос выполнен успешно.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Данные запроса не прошли проверку. Исправьте указанные поля.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "description": "Проверить приглашение к привязке из бота. Доступ к финансовым записям ограничен владельцем или администратором; ответы списков ограничены размером страницы.",
+        "security": []
+      },
+      "post": {
+        "tags": [
+          "Авторизация"
+        ],
+        "summary": "Подтвердить привязку к вошедшему аккаунту",
+        "operationId": "bot_link_accept_api_v1_auth_telegram_bot_link_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BotLink"
+              }
+            }
+          },
+          "description": "Поля запроса в формате application/json. Неизвестные поля не принимаются."
+        },
+        "responses": {
+          "200": {
+            "description": "Запрос выполнен успешно.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Данные запроса не прошли проверку. Исправьте указанные поля.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Сессия отсутствует, истекла или была завершена. Войдите снова."
+          },
+          "403": {
+            "description": "Недостаточно прав, запрещённый адрес запроса или недействительный CSRF-токен."
+          }
+        },
+        "description": "Подтвердить привязку к вошедшему аккаунту. Доступ к финансовым записям ограничен владельцем или администратором; ответы списков ограничены размером страницы.",
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auth/telegram/start": {
+      "post": {
+        "tags": [
+          "Авторизация"
+        ],
+        "summary": "Начать подтверждение в Telegram",
+        "operationId": "start_api_v1_auth_telegram_start_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChallengeRequest"
+              }
+            }
+          },
+          "required": true,
+          "description": "Поля запроса в формате application/json. Неизвестные поля не принимаются."
+        },
+        "responses": {
+          "200": {
+            "description": "Запрос выполнен успешно.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Данные запроса не прошли проверку. Исправьте указанные поля.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "description": "Начать подтверждение в Telegram. Доступ к финансовым записям ограничен владельцем или администратором; ответы списков ограничены размером страницы. Режим login доступен до входа; режим link требует сессию и CSRF. Telegram не создаёт новые аккаунты.",
+        "security": []
+      }
+    },
+    "/api/v1/auth/telegram/status": {
+      "get": {
+        "tags": [
+          "Авторизация"
+        ],
+        "summary": "Проверить подтверждение Telegram",
+        "operationId": "status_api_v1_auth_telegram_status_get",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Идентификатор запроса"
+            },
+            "description": "Идентификатор запроса. Учитываются права текущего пользователя."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Запрос выполнен успешно.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Данные запроса не прошли проверку. Исправьте указанные поля.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "description": "Проверить подтверждение Telegram. Доступ к финансовым записям ограничен владельцем или администратором; ответы списков ограничены размером страницы. Требуется cookie исходного браузера; для режима привязки дополнительно нужны прежняя сессия и CSRF.",
+        "security": [
+          {
+            "telegramBrowser": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auth/telegram/complete": {
+      "post": {
+        "tags": [
+          "Авторизация"
+        ],
+        "summary": "Завершить вход в исходном браузере",
+        "operationId": "complete_api_v1_auth_telegram_complete_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChallengeId"
+              }
+            }
+          },
+          "required": true,
+          "description": "Поля запроса в формате application/json. Неизвестные поля не принимаются."
+        },
+        "responses": {
+          "200": {
+            "description": "Запрос выполнен успешно.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Данные запроса не прошли проверку. Исправьте указанные поля.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "description": "Завершить вход в исходном браузере. Доступ к финансовым записям ограничен владельцем или администратором; ответы списков ограничены размером страницы. Требуется cookie исходного браузера; для режима привязки дополнительно нужны прежняя сессия и CSRF.",
+        "security": [
+          {
+            "telegramBrowser": []
+          }
+        ]
+      }
     }
   },
   "components": {
     "schemas": {
+      "BotLink": {
+        "properties": {
+          "token": {
+            "type": "string",
+            "title": "Одноразовый токен"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "token"
+        ],
+        "title": "Привязка из бота"
+      },
+      "ChallengeId": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Идентификатор"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "title": "Подтверждение запроса Telegram"
+      },
+      "ChallengeRequest": {
+        "properties": {
+          "mode": {
+            "type": "string",
+            "title": "Режим",
+            "default": "login"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "Начало подтверждения Telegram"
+      },
       "ConfirmLink": {
         "properties": {
           "request_id": {
@@ -1886,6 +2992,12 @@
         "in": "header",
         "name": "X-CSRF-Token",
         "description": "Скопируйте csrf_token из ответа входа или GET /api/v1/auth/me. Токен обязателен для изменяющих запросов POST, PATCH и DELETE после входа."
+      },
+      "telegramBrowser": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "ik_telegram_browser",
+        "description": "Одноразовый HttpOnly cookie исходного браузера. Выдаётся методом начала входа, не передаётся боту и действует пять минут."
       }
     }
   },

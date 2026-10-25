@@ -27,7 +27,7 @@ import httpx
 
 from .config import load_settings
 from .db import connect, initialize, transaction
-from .telegram_connections import GROUP_TYPES, disconnect, group_id, record_candidate
+from .telegram_connections import GROUP_TYPES, disable_destination, group_id, record_candidate
 
 logger = logging.getLogger("invoice_keeper.telegram_bot")
 POLL_SECONDS = 20
@@ -163,7 +163,7 @@ def module_url(origin: str) -> str | None:
 
 
 def authorized_context(settings, update):
-    """Accept setup/service events only. No chat can read financial tables."""
+    """Groups accept setup only; private reads require an identity later."""
     if not isinstance(update,dict):
         return None
     event=update.get("my_chat_member")
@@ -181,13 +181,82 @@ def authorized_context(settings, update):
         return None
     if message.get("migrate_to_chat_id") or message.get("migrate_from_chat_id"):
         return message,None
+    private=message['chat'].get('type')=='private'
+    if private and isinstance(message.get('chat_shared'),dict):return message,None
     content=message.get("text")
+    if private and content=='🏠 Кабинет':return message,None
     if not isinstance(content,str) or len(content)>512 or not content.startswith("/"):
         return None
     command=content.split(maxsplit=1)[0].split("@",1)[0].lower()
-    if command not in {"/connect","/start","/help"}:
+    commands={"/connect","/start","/help"}|({"/login","/menu","/payments","/history","/summary","/chats"} if private else set())
+    if command not in commands:
         return None
     return message,None
+
+
+def handle_private(settings,db,message,callback,bot_username,client,bot_id,now):
+    """Private messages must belong to the currently authenticated identity."""
+    from fastapi import HTTPException
+    from .telegram_identity import bot_challenge,identity_user,make_bot_link
+    from .telegram_cabinet import build_view,handle_chat_action,parse_callback
+    chat=message['chat'];sender=(callback.get('from') if callback else message.get('from')) or {}
+    tid=sender.get('id')
+    if isinstance(tid,bool) or not isinstance(tid,int) or not 0<tid<2**63 or sender.get('is_bot') or str(chat.get('id'))!=str(tid):
+        return None
+    now=int(time.time()) if now is None else now
+    panel=module_url(settings.origin)
+    def reply(text,markup=None,edit=True):
+        payload={'chat_id':chat['id'],'text':text,'parse_mode':'HTML','disable_web_page_preview':True}
+        if markup is not None:payload['reply_markup']=markup
+        method='sendMessage'
+        if callback and edit and isinstance(message.get('message_id'),int):
+            payload['message_id']=message['message_id'];method='editMessageText'
+        return BotAction(method,payload,callback.get('id') if callback else None)
+    def render(result):return reply(result.text,result.markup,result.edit)
+    content=message.get('text','').split(maxsplit=1)
+    addressed=content[0].split('@',1) if content else ['']
+    if len(addressed)>1 and (not bot_username or addressed[1].casefold()!=bot_username.casefold()):return None
+    command=addressed[0].lower()
+    data=callback.get('data','') if callback else ''
+    if callback and (not isinstance(data,str) or len(data.encode())>64):return None
+    if command=='/connect':return None
+    if callback and not data.startswith(('auth:','cab:','chat:')):
+        return BotAction('answerCallbackQuery',{'callback_query_id':callback['id'],'text':'Кнопка устарела. Откройте /menu.'})
+    code=None
+    if callback and data.startswith('auth:'):code=data[5:]
+    elif command=='/start' and len(content)==2 and content[1].startswith('auth_'):code=content[1][5:]
+    if code is not None:
+        result=bot_challenge(db,settings,code,sender,confirm=bool(callback),now=now)
+        if result is None:return reply('Ссылка истекла или уже использована. Создайте новую на сайте.')
+        if 'error' in result:return reply(escape(result['error']))
+        if callback:return reply('✅ Подтверждено. Вернитесь в тот браузер, где начали вход или привязку.')
+        action='вход' if result['mode']=='login' else 'привязку Telegram'
+        return reply('🔐 Подтвердите '+action+' для аккаунта <b>'+escape(result['username'])+'</b>.\n\nНажимайте только если сами начали это действие на сайте '+escape(settings.origin)+'. Если ссылку прислал другой человек, не подтверждайте.',
+          {'inline_keyboard':[[{'text':'✅ Подтвердить '+action,'callback_data':'auth:'+code}]]})
+    user=identity_user(db,tid)
+    if user is None:
+        if not panel:return reply('Для привязки откройте приложение по публичному HTTPS-адресу и выберите Telegram в настройках.')
+        link=make_bot_link(db,settings,sender,now)
+        return reply('🔐 <b>Войти в личный кабинет</b>\n\nОткройте сайт, войдите в существующий аккаунт и подтвердите привязку Telegram. После этого здесь появятся ваши платежи и история. Ссылка действует 10 минут.',
+          {'inline_keyboard':[[{'text':'Связать аккаунт сайта','url':link['url']}]]})
+    try:
+        if message.get('chat_shared') is not None:
+            if client is None or not isinstance(bot_id,int):return reply('Подключение Telegram временно недоступно.')
+            return render(handle_chat_action(db,settings,user,sender,'',client,bot_id,now,shared=message['chat_shared']))
+        if data.startswith('chat:') or command=='/chats' or (command=='/start' and len(content)==2 and content[1]=='chats'):
+            if client is None or not isinstance(bot_id,int):return reply('Подключение Telegram временно недоступно.')
+            return render(handle_chat_action(db,settings,user,sender,data or 'chat:list',client,bot_id,now))
+        if callback:
+            parsed=parse_callback(data,settings.today)
+            if parsed is None:return reply('Эта кнопка устарела. Откройте /menu заново.')
+            view,key,page=parsed
+        else:
+            view={'/payments':'payments','/history':'history','/summary':'summary','/help':'help'}.get(command,'menu')
+            key=content[1] if len(content)==2 and command in {'/payments','/summary'} else None
+            page=0
+        return render(build_view(db,settings,tid,view,key,page,panel))
+    except HTTPException as exc:
+        return reply(escape(str(exc.detail)))
 
 
 def handle_update(settings,db,update,bot_username=None,client=None,bot_id=None,now=None):
@@ -197,6 +266,8 @@ def handle_update(settings,db,update,bot_username=None,client=None,bot_id=None,n
     message,callback=context
     chat=message["chat"]
     cid=group_id(chat.get("id"))
+    if chat.get('type')=='private' and not update.get('my_chat_member'):
+        return handle_private(settings,db,message,callback,bot_username,client,bot_id,now)
     if callback:
         return BotAction("answerCallbackQuery",{"callback_query_id":callback["id"],"text":"Работа с платежами доступна в веб-панели."})
     event=update.get("my_chat_member")
@@ -206,9 +277,9 @@ def handle_update(settings,db,update,bot_username=None,client=None,bot_id=None,n
         can_send=status in {"creator","administrator","member"} or (status=="restricted" and member.get("is_member") is True and member.get("can_send_messages") is True)
         if not can_send:
             with transaction(db):
-                active=db.execute("SELECT * FROM telegram_connection WHERE chat_id=? AND active=1 AND bot_scope=?", (cid,token_scope(settings.telegram_bot_token))).fetchone()
+                active=db.execute("SELECT * FROM telegram_active_destinations WHERE chat_id=? AND active=1 AND bot_scope=?", (cid,token_scope(settings.telegram_bot_token))).fetchone()
                 if active:
-                    disconnect(db,reason="bot_removed_or_restricted",team_id=active['id'])
+                    disable_destination(db,cid,reason="bot_removed_or_restricted")
                 db.execute("UPDATE telegram_link_requests SET state='revoked' WHERE chat_id=? AND state IN ('pending','candidate')",(cid,))
         return None
     if message.get("migrate_to_chat_id") or message.get("migrate_from_chat_id"):
@@ -216,9 +287,9 @@ def handle_update(settings,db,update,bot_username=None,client=None,bot_id=None,n
         # confirmation instead of forwarding an old queue to a new chat ID.
         old=group_id(message.get("migrate_from_chat_id")) or cid
         with transaction(db):
-            active=db.execute("SELECT * FROM telegram_connection WHERE chat_id=? AND active=1 AND bot_scope=?", (old,token_scope(settings.telegram_bot_token))).fetchone()
+            active=db.execute("SELECT * FROM telegram_active_destinations WHERE chat_id=? AND active=1 AND bot_scope=?", (old,token_scope(settings.telegram_bot_token))).fetchone()
             if active:
-                disconnect(db,reason="group_migrated_reconnect_required",team_id=active['id'])
+                disable_destination(db,old,reason="group_migrated_reconnect_required")
         return None
     content=message.get("text","").split(maxsplit=1)
     addressed=content[0].split("@",1)
@@ -266,7 +337,7 @@ def handle_update(settings,db,update,bot_username=None,client=None,bot_id=None,n
 
 
 class TelegramClient:
-    METHODS = frozenset({"getMe", "getWebhookInfo", "getUpdates", "sendMessage", "answerCallbackQuery", "getChatAdministrators", "getChatMember", "getChat"})
+    METHODS = frozenset({"getMe", "getWebhookInfo", "getUpdates", "sendMessage", "editMessageText", "answerCallbackQuery", "getChatAdministrators", "getChatMember", "getChat"})
 
     def __init__(self, token: str, client=None):
         # HTTPX's INFO request line embeds the bot token in the URL. Keep the

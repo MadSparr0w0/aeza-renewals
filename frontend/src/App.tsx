@@ -16,6 +16,7 @@ import type {
   Currency,
   Invitation,
   Occurrence,
+  Page,
   Recurring,
   Session,
   Settings,
@@ -58,6 +59,7 @@ import {
 } from "./AccountForms";
 import BrandIcon from "./BrandIcon";
 import type { BrandIconName } from "./BrandIcon";
+import { TelegramBotLinkConfirm, TelegramIdentityPanel } from "./TelegramAuth";
 
 type View =
   | "overview"
@@ -129,6 +131,23 @@ function readInvitationToken() {
   );
   return value ? (value.length <= 512 ? value : "invalid") : null;
 }
+function readTelegramToken() {
+  const value = new URLSearchParams(window.location.hash.slice(1)).get(
+    "telegram",
+  );
+  return value ? (value.length <= 512 ? value : "invalid") : null;
+}
+function removeTelegramFragment() {
+  const fragment = new URLSearchParams(window.location.hash.slice(1));
+  fragment.delete("telegram");
+  window.history.replaceState(
+    null,
+    "",
+    window.location.pathname +
+      window.location.search +
+      (fragment.size ? `#${fragment}` : ""),
+  );
+}
 function removeInvitationFragment() {
   window.history.replaceState(
     null,
@@ -145,14 +164,10 @@ export default function App() {
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const sidebarRef = useRef<HTMLElement>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [occurrences, setOccurrences] = useState<Occurrence[]>([]);
-  const [recurring, setRecurring] = useState<Recurring[]>([]);
+  const [nextItems, setNextItems] = useState<Occurrence[]>([]);
   const [summary, setSummary] = useState<Summary | null>(null);
-  const [users, setUsers] = useState<User[]>([]);
-  const [admins, setAdmins] = useState<User[]>([]);
   const [month, setMonth] = useState(savedNavigation.month);
   const [currency, setCurrency] = useState<Currency>("RUB");
-  const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
   const [revision, setRevision] = useState(0);
@@ -169,6 +184,7 @@ export default function App() {
     null,
   );
   const [invitationToken, setInvitationToken] = useState(readInvitationToken);
+  const [telegramToken, setTelegramToken] = useState(readTelegramToken);
   const [passwordOpen, setPasswordOpen] = useState(false);
   const [authNotice, setAuthNotice] = useState("");
   const today = settings?.today || new Date().toLocaleDateString("en-CA");
@@ -178,10 +194,7 @@ export default function App() {
     clearNavigation();
     setCsrf("");
     setSession(null);
-    setOccurrences([]);
-    setRecurring([]);
-    setUsers([]);
-    setAdmins([]);
+    setNextItems([]);
     setInvitations([]);
     setSettings(null);
     setSummary(null);
@@ -204,7 +217,10 @@ export default function App() {
     setView("overview");
   }
   useEffect(() => {
-    const changed = () => setInvitationToken(readInvitationToken());
+    const changed = () => {
+      setInvitationToken(readInvitationToken());
+      setTelegramToken(readTelegramToken());
+    };
     window.addEventListener("hashchange", changed);
     return () => window.removeEventListener("hashchange", changed);
   }, []);
@@ -299,89 +315,52 @@ export default function App() {
   }, [toast]);
   useEffect(() => {
     if (!session) return;
-    let mounted = true;
-    setLoading(true);
-    setError("");
-    Promise.all([
-      api<Recurring[]>("/recurring-payments"),
-      api<Settings>("/settings"),
-    ])
-      .then(([definitions, config]) => {
-        if (mounted) {
-          setRecurring(definitions);
-          setSettings(config);
-        }
-      })
-      .catch((e) => {
-        if (mounted) {
-          setError(
-            e instanceof Error ? e.message : "Не удалось загрузить данные.",
-          );
-          if (e instanceof ApiError && e.status === 401) setSession(null);
-        }
-      })
-      .finally(() => {
-        if (mounted) setLoading(false);
-      });
-    return () => {
-      mounted = false;
-    };
-  }, [session, revision]);
-  useEffect(() => {
-    if (!session) return;
-    let mounted = true;
-    setSummary(null);
-    setLoading(true);
-    api<Occurrence[]>(`/payment-occurrences?month=${activeMonth}`)
-      .then(async (selected) => {
-        const [result, allItems] = await Promise.all([
-          api<Summary>(`/payments/summary?month=${activeMonth}`),
-          api<Occurrence[]>("/payment-occurrences"),
-        ]);
-        if (mounted) {
-          setSummary(result);
-          setOccurrences([
-            ...allItems.filter((i) => !i.due_date.startsWith(activeMonth)),
-            ...selected,
-          ]);
-        }
-      })
-      .catch((e) => {
-        if (mounted) setError(e.message);
-      })
-      .finally(() => {
-        if (mounted) setLoading(false);
-      });
-    return () => {
-      mounted = false;
-    };
-  }, [session, activeMonth, revision]);
-  useEffect(() => {
-    if (!isAdmin) return;
-    let mounted = true;
-    setLoading(true);
-    api<User[]>("/users")
+    const controller = new AbortController();
+    api<Settings>("/settings", { signal: controller.signal })
       .then((result) => {
-        if (mounted) setUsers(result);
+        if (!controller.signal.aborted) setSettings(result);
       })
-      .catch((e) => {
-        if (mounted) setError(e.message);
-      })
-      .finally(() => {
-        if (mounted) setLoading(false);
+      .catch((reason) => {
+        if (!controller.signal.aborted) setError((reason as Error).message);
       });
-    return () => {
-      mounted = false;
-    };
-  }, [isAdmin, revision]);
+    return () => controller.abort();
+  }, [session, revision]);
+  const financialView = [
+    "overview",
+    "payments",
+    "calendar",
+    "history",
+  ].includes(view);
   useEffect(() => {
-    if (!session?.user.env_managed || view !== "team") return;
-    let mounted = true;
-    api<User[]>("/admins")
-      .then((result) => { if (mounted) setAdmins(result); })
-      .catch((reason) => { if (mounted) setError((reason as Error).message); });
-    return () => { mounted = false; };
-  }, [session?.user.env_managed, view, revision]);
+    if (!session || !financialView) return;
+    const controller = new AbortController();
+    setSummary(null);
+    api<Summary>(`/payments/summary?month=${activeMonth}`, {
+      signal: controller.signal,
+    })
+      .then((result) => {
+        if (!controller.signal.aborted) setSummary(result);
+      })
+      .catch((reason) => {
+        if (!controller.signal.aborted) setError((reason as Error).message);
+      });
+    return () => controller.abort();
+  }, [session, activeMonth, revision, financialView]);
+  useEffect(() => {
+    if (!session || view !== "overview") return;
+    const controller = new AbortController();
+    api<Page<Occurrence>>(
+      "/payment-occurrences/page?status=upcoming&currency=all&limit=3&offset=0&sort=due_date&descending=false",
+      { signal: controller.signal },
+    )
+      .then((result) => {
+        if (!controller.signal.aborted) setNextItems(result.items);
+      })
+      .catch((reason) => {
+        if (!controller.signal.aborted) setError((reason as Error).message);
+      });
+    return () => controller.abort();
+  }, [session, revision, view]);
   useEffect(() => {
     if (!isAdmin || view !== "team") return;
     let mounted = true;
@@ -396,19 +375,13 @@ export default function App() {
       mounted = false;
     };
   }, [isAdmin, view, revision]);
-  const currentItems = occurrences.filter((i) =>
-    i.due_date.startsWith(activeMonth),
-  );
-  const currencyItems = currentItems.filter((i) => i.currency === currency);
-  const nextItems = occurrences
-    .filter((i) => !i.is_paid && i.recurring_active && i.due_date >= today)
-    .sort((a, b) => a.due_date.localeCompare(b.due_date))
-    .slice(0, 3);
   const sums = summary?.currencies[currency];
+  const currencyCounts = summary?.counts_by_currency?.[currency];
   const counts = {
-    paid: currencyItems.filter((i) => i.is_paid).length,
-    overdue: currencyItems.filter((i) => i.status === "overdue").length,
-    unpaid: currencyItems.filter((i) => !i.is_paid).length,
+    paid: currencyCounts?.paid_count || 0,
+    overdue: currencyCounts?.overdue_count || 0,
+    unpaid: currencyCounts?.unpaid_count || 0,
+    total: currencyCounts?.total_count || 0,
   };
   const refresh = (message: string) => {
     setRevision((v) => v + 1);
@@ -467,7 +440,11 @@ export default function App() {
     return (
       <>
         <Login
-          notice={authNotice}
+          notice={
+            telegramToken
+              ? "Войдите в свою учётную запись, чтобы подтвердить привязку Telegram."
+              : authNotice
+          }
           onLogin={(s) => {
             setError("");
             setAuthNotice("");
@@ -490,9 +467,6 @@ export default function App() {
     { id: "calendar", icon: "calendar" },
     { id: "history", icon: "history" },
   ];
-  const seriesForPayment = payment
-    ? recurring.find((series) => series.id === payment.recurring_payment_id)
-    : undefined;
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-content">
@@ -524,13 +498,9 @@ export default function App() {
             >
               <BrandIcon name={item.icon} size={19} />
               <span>{viewNames[item.id]}</span>
-              {item.id === "payments" &&
-                currentItems.filter((i) => i.status === "overdue").length >
-                  0 && (
-                  <em>
-                    {currentItems.filter((i) => i.status === "overdue").length}
-                  </em>
-                )}
+              {item.id === "payments" && (summary?.overdue_count || 0) > 0 && (
+                <em>{summary?.overdue_count || 0}</em>
+              )}
             </button>
           ))}
         </nav>
@@ -645,7 +615,10 @@ export default function App() {
             {isAdmin && view === "team" && (
               <div className="page-heading-actions">
                 {session.user.env_managed && (
-                  <button className="button secondary" onClick={() => setAdminModalOpen(true)}>
+                  <button
+                    className="button secondary"
+                    onClick={() => setAdminModalOpen(true)}
+                  >
                     <Plus size={17} /> Создать администратора
                   </button>
                 )}
@@ -741,7 +714,7 @@ export default function App() {
                 <Metric
                   label="План на месяц"
                   value={sums ? money(sums.planned, currency) : "—"}
-                  caption={`${currencyItems.length} ${plural(currencyItems.length, ["платёж", "платежа", "платежей"])} за месяц`}
+                  caption={`${counts.total} ${plural(counts.total, ["платёж", "платежа", "платежей"])} за месяц`}
                   icon={<BrandIcon name="payments" size={19} />}
                   variant="plan"
                 />
@@ -776,7 +749,7 @@ export default function App() {
                 amounts={sums}
                 currency={currency}
                 paidCount={counts.paid}
-                totalCount={currencyItems.length}
+                totalCount={counts.total}
                 settings={settings}
                 onSettings={() => changeView("settings")}
               />
@@ -785,10 +758,9 @@ export default function App() {
           {["overview", "payments", "history"].includes(view) && (
             <Payments
               key={view}
-              items={currentItems}
               today={today}
               month={activeMonth}
-              loading={loading}
+              revision={revision}
               history={view === "history"}
               isAdmin={!!isAdmin}
               onAdd={() => setAddPreset("")}
@@ -811,32 +783,37 @@ export default function App() {
             <Calendar
               month={activeMonth}
               today={today}
-              items={currentItems}
+              revision={revision}
+              isAdmin={!!isAdmin}
               onSelect={setPayment}
             />
           )}
           {view === "team" && isAdmin && (
             <Team
-              users={users}
+              revision={revision}
               session={session}
               onEdit={setUserModal}
               onDelete={setDeleteUser}
               invitations={invitations}
-              admins={session.user.env_managed ? admins : undefined}
               onRevokeInvitation={setRevokeInvitation}
             />
           )}
           {view === "settings" && (
-            <SettingsPanel
-              settings={settings}
-              activeCount={recurring.filter((p) => p.active !== false).length}
-              onActivity={isAdmin ? () => changeView("activity") : undefined}
-              onChangePassword={
-                !session.user.env_managed ? () => setPasswordOpen(true) : undefined
-              }
-              canConfigureTelegram={!!isAdmin}
-              onTelegramChanged={() => setRevision((value) => value + 1)}
-            />
+            <>
+              <SettingsPanel
+                settings={settings}
+                activeCount={settings?.active_count || 0}
+                onActivity={isAdmin ? () => changeView("activity") : undefined}
+                onChangePassword={
+                  !session.user.env_managed
+                    ? () => setPasswordOpen(true)
+                    : undefined
+                }
+                canConfigureTelegram={!!isAdmin}
+                onTelegramChanged={() => setRevision((value) => value + 1)}
+              />
+              <TelegramIdentityPanel />
+            </>
           )}
           {view === "activity" && isAdmin && (
             <ActivityPanel timezone={settings?.timezone || "Europe/Moscow"} />
@@ -852,20 +829,26 @@ export default function App() {
           </button>
         </div>
       )}
+      {telegramToken && (
+        <TelegramBotLinkConfirm
+          token={telegramToken}
+          accountName={session.user.full_name || session.user.username}
+          onSuccess={() => {
+            removeTelegramFragment();
+            setTelegramToken(null);
+            refresh("Telegram привязан к учётной записи.");
+          }}
+          onCancel={() => {
+            removeTelegramFragment();
+            setTelegramToken(null);
+          }}
+        />
+      )}
       {addPreset !== null && (
         <AddPayment
           today={today}
           initialName={addPreset}
-          owners={
-            isAdmin
-              ? [
-                  ...new Map(
-                    [session.user, ...users].map((owner) => [owner.id, owner]),
-                  ).values(),
-                ]
-              : undefined
-          }
-          defaultOwnerId={session.user.id}
+          owner={isAdmin ? session.user : undefined}
           onClose={() => setAddPreset(null)}
           onSuccess={() => {
             setAddPreset(null);
@@ -885,10 +868,17 @@ export default function App() {
           }}
           onDelete={() => setDeletePayment(payment)}
           onEditSeries={
-            seriesForPayment?.active && seriesForPayment.can_manage
-              ? () => {
-                  setEditSeries(seriesForPayment);
-                  setPayment(null);
+            payment.recurring_active && payment.can_manage
+              ? async () => {
+                  try {
+                    const series = await api<Recurring>(
+                      `/recurring-payments/${payment.recurring_payment_id}`,
+                    );
+                    setEditSeries(series);
+                    setPayment(null);
+                  } catch (reason) {
+                    setError((reason as Error).message);
+                  }
                 }
               : undefined
           }
@@ -969,7 +959,7 @@ export default function App() {
           }}
         />
       )}
-      {passwordOpen && !isAdmin && (
+      {passwordOpen && !session.user.env_managed && (
         <ChangePasswordModal
           onClose={() => setPasswordOpen(false)}
           onChanged={() => {

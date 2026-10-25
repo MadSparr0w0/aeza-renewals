@@ -57,7 +57,8 @@ def claim(db, owner: str, now: int, scope=None):
           b.recipient_chat_id,b.delivery_scope,u.full_name AS owner_name
           FROM reminder_outbox b JOIN payment_occurrences o ON o.id=b.occurrence_id
           JOIN recurring_payments r ON r.id=o.recurring_payment_id
-          JOIN users u ON u.id=r.owner_id JOIN telegram_connection c ON c.id=u.team_id AND c.active=1
+          JOIN users u ON u.id=r.owner_id JOIN telegram_active_destinations c
+          ON c.id=u.team_id AND c.active=1 AND c.chat_id=b.recipient_chat_id AND c.bot_scope=b.delivery_scope
           WHERE b.state IN ('pending','retry') AND b.next_attempt_at<=? AND o.is_paid=0 AND r.active=1
           AND c.chat_type IN ('group','supergroup') AND b.recipient_chat_id=c.chat_id AND b.delivery_scope=c.bot_scope
           AND (? IS NULL OR c.bot_scope=?) ORDER BY o.due_date,b.id LIMIT 1""", (now,scope,scope)).fetchone()
@@ -153,7 +154,7 @@ def tick(settings, owner=None, sender=deliver, now=None):
             materialize(db, settings.today)
             schedule_reminders(db, settings.today)
         scope = token_scope(settings.telegram_bot_token)
-        if not db.execute("SELECT 1 FROM telegram_connection WHERE active=1 AND bot_scope=? LIMIT 1", (scope,)).fetchone():
+        if not db.execute("SELECT 1 FROM telegram_active_destinations WHERE active=1 AND bot_scope=? LIMIT 1", (scope,)).fetchone():
             return False
         row = claim(db, owner, now, scope)
         if not row:
@@ -162,7 +163,7 @@ def tick(settings, owner=None, sender=deliver, now=None):
         # after this check cannot retract an already sent Telegram message.
         valid = db.execute("""SELECT 1 FROM reminder_outbox b JOIN payment_occurrences o ON o.id=b.occurrence_id JOIN recurring_payments r ON r.id=o.recurring_payment_id
           JOIN users account ON account.id=r.owner_id
-          JOIN telegram_connection c ON c.id=account.team_id AND c.active=1
+          JOIN telegram_active_destinations c ON c.id=account.team_id AND c.active=1 AND c.chat_id=b.recipient_chat_id AND c.bot_scope=b.delivery_scope
           WHERE b.id=? AND b.state='sending' AND b.lease_owner=? AND o.is_paid=0 AND r.active=1
           AND b.recipient_chat_id=c.chat_id AND b.delivery_scope=c.bot_scope AND c.bot_scope=?
           AND c.chat_type IN ('group','supergroup')""", (row["id"], owner,token_scope(settings.telegram_bot_token))).fetchone()

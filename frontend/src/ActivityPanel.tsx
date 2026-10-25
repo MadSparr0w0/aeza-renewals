@@ -1,11 +1,4 @@
-import {
-  useCallback,
-  useEffect,
-  useId,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useId, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import {
   Bell,
@@ -15,7 +8,7 @@ import {
   RefreshCw,
   Search,
 } from "lucide-react";
-import { api, ApiError } from "./api";
+import { Pagination, useDebounced, usePage } from "./DataControls";
 import "./ActivityPanel.css";
 
 type Tab = "activity" | "reminders";
@@ -38,13 +31,7 @@ type ReminderRecord = {
   sent_at: string | null;
   last_error: string | null;
 };
-type LoadStatus = {
-  loading: boolean;
-  loaded: boolean;
-  error: string;
-  updatedAt: string | null;
-};
-const PAGE_SIZE = 20;
+const PAGE_SIZE = 30;
 const actionNames: Record<
   string,
   { label: string; category: Category | "other" }
@@ -72,6 +59,9 @@ const actionNames: Record<
   invitation_revoked: { label: "Приглашение отозвано", category: "users" },
   invitation_accepted: { label: "Приглашение принято", category: "users" },
   password_changed: { label: "Пароль изменён", category: "access" },
+  telegram_login: { label: "Вход через Telegram", category: "access" },
+  telegram_identity_linked: { label: "Telegram привязан", category: "access" },
+  telegram_identity_unlinked: { label: "Telegram отвязан", category: "access" },
   telegram_link_requested: {
     label: "Создан код подключения чата",
     category: "access",
@@ -105,12 +95,6 @@ const reminderErrors: Record<string, string> = {
   lease_expired_delivery_unknown:
     "Обработка прервалась до подтверждения доставки.",
 };
-const emptyStatus = (): LoadStatus => ({
-  loading: true,
-  loaded: false,
-  error: "",
-  updatedAt: null,
-});
 const actionInfo = (value: string) =>
   Object.hasOwn(actionNames, value)
     ? actionNames[value]
@@ -120,35 +104,6 @@ const stateName = (value: string) =>
     ? reminderStates[value]
     : "Неизвестный статус";
 const who = (value: string) => (value === "system" ? "Система" : value);
-const isObject = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null;
-const isInteger = (value: unknown): value is number =>
-  typeof value === "number" && Number.isSafeInteger(value);
-function isAction(value: unknown): value is ActionRecord {
-  return (
-    isObject(value) &&
-    isInteger(value.id) &&
-    typeof value.username === "string" &&
-    typeof value.action === "string" &&
-    typeof value.description === "string" &&
-    typeof value.created_at === "string"
-  );
-}
-function isReminder(value: unknown): value is ReminderRecord {
-  return (
-    isObject(value) &&
-    isInteger(value.id) &&
-    isInteger(value.occurrence_id) &&
-    typeof value.name === "string" &&
-    typeof value.due_date === "string" &&
-    typeof value.state === "string" &&
-    isInteger(value.attempts) &&
-    value.attempts >= 0 &&
-    typeof value.next_attempt_at === "number" &&
-    (value.sent_at === null || typeof value.sent_at === "string") &&
-    (value.last_error === null || typeof value.last_error === "string")
-  );
-}
 function reminderDetail(row: ReminderRecord): string {
   if (row.state === "unknown")
     return "Требует проверки в Telegram, автоматический повтор отключён.";
@@ -168,79 +123,55 @@ function reminderDetail(row: ReminderRecord): string {
 export default function ActivityPanel({ timezone }: { timezone: string }) {
   const id = useId();
   const [tab, setTab] = useState<Tab>("activity");
-  const [activities, setActivities] = useState<ActionRecord[]>([]);
-  const [reminders, setReminders] = useState<ReminderRecord[]>([]);
-  const [statuses, setStatuses] = useState<Record<Tab, LoadStatus>>({
-    activity: emptyStatus(),
-    reminders: emptyStatus(),
-  });
   const [category, setCategory] = useState<Category>("all");
   const [stateFilter, setStateFilter] = useState("all");
   const [queries, setQueries] = useState<Record<Tab, string>>({
     activity: "",
     reminders: "",
   });
-  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
-  const controllers = useRef<Partial<Record<Tab, AbortController>>>({});
-  const versions = useRef<Record<Tab, number>>({ activity: 0, reminders: 0 });
+  const [offsets, setOffsets] = useState<Record<Tab, number>>({
+    activity: 0,
+    reminders: 0,
+  });
   const tabs = useRef<Partial<Record<Tab, HTMLButtonElement | null>>>({});
-
-  const load = useCallback(async (kind: Tab) => {
-    controllers.current[kind]?.abort();
-    const controller = new AbortController();
-    controllers.current[kind] = controller;
-    const version = ++versions.current[kind];
-    setStatuses((previous) => ({
-      ...previous,
-      [kind]: { ...previous[kind], loading: true, error: "" },
-    }));
-    try {
-      const data = await api<unknown>(
-        kind === "activity" ? "/activity?limit=100" : "/reminders",
-        { signal: controller.signal },
-      );
-      if (controller.signal.aborted || versions.current[kind] !== version)
-        return;
-      if (
-        !Array.isArray(data) ||
-        (kind === "activity" ? !data.every(isAction) : !data.every(isReminder))
-      ) {
-        throw new Error("invalid_activity_response");
-      }
-      if (kind === "activity")
-        setActivities((data as ActionRecord[]).slice(0, 100));
-      else setReminders((data as ReminderRecord[]).slice(0, 100));
-      setStatuses((previous) => ({
-        ...previous,
-        [kind]: {
-          loading: false,
-          loaded: true,
-          error: "",
-          updatedAt: new Date().toISOString(),
-        },
-      }));
-    } catch (error) {
-      if (controller.signal.aborted || versions.current[kind] !== version)
-        return;
-      const message =
-        error instanceof ApiError
-          ? error.message
-          : "Сервер вернул неполные данные. Повторите загрузку.";
-      setStatuses((previous) => ({
-        ...previous,
-        [kind]: { ...previous[kind], loading: false, error: message },
-      }));
-    }
-  }, []);
-
-  useEffect(() => {
-    void load("activity");
-    void load("reminders");
-    return () => {
-      controllers.current.activity?.abort();
-      controllers.current.reminders?.abort();
-    };
-  }, [load]);
+  const activitySearch = useDebounced(queries.activity.trim(), 300);
+  const reminderSearch = useDebounced(queries.reminders.trim(), 300);
+  const activityReady = activitySearch === queries.activity.trim();
+  const reminderReady = reminderSearch === queries.reminders.trim();
+  const activity = usePage<ActionRecord>(
+    tab === "activity" && activityReady
+      ? "/activity/page?" +
+          new URLSearchParams({
+            category,
+            search: activitySearch,
+            limit: String(PAGE_SIZE),
+            offset: String(offsets.activity),
+          })
+      : null,
+  );
+  const reminders = usePage<ReminderRecord>(
+    tab === "reminders" && reminderReady
+      ? "/reminders/page?" +
+          new URLSearchParams({
+            state: stateFilter,
+            search: reminderSearch,
+            limit: String(PAGE_SIZE),
+            offset: String(offsets.reminders),
+          })
+      : null,
+  );
+  const current = tab === "activity" ? activity : reminders;
+  const loading =
+    current.loading || !(tab === "activity" ? activityReady : reminderReady);
+  const hasFilters =
+    Boolean(queries[tab].trim()) ||
+    (tab === "activity" ? category !== "all" : stateFilter !== "all");
+  const actionRows = activity.page?.items || [];
+  const reminderRows = reminders.page?.items || [];
+  const rowCount = current.page?.items.length || 0;
+  const setOffset = (offset: number) => {
+    setOffsets((previous) => ({ ...previous, [tab]: offset }));
+  };
 
   const stamp = useCallback(
     (value: string | null): string => {
@@ -275,80 +206,8 @@ export default function ActivityPanel({ timezone }: { timezone: string }) {
       timeZone: "UTC",
     }).format(parsed);
   };
-  const filteredActivities = useMemo(() => {
-    const query = queries.activity.trim().toLocaleLowerCase("ru-RU");
-    return activities.filter(
-      (row) =>
-        (category === "all" || actionInfo(row.action).category === category) &&
-        (!query ||
-          [who(row.username), actionInfo(row.action).label, row.description]
-            .join(" ")
-            .toLocaleLowerCase("ru-RU")
-            .includes(query)),
-    );
-  }, [activities, category, queries.activity]);
-  const filteredReminders = useMemo(() => {
-    const query = queries.reminders.trim().toLocaleLowerCase("ru-RU");
-    return reminders.filter(
-      (row) =>
-        (stateFilter === "all" || row.state === stateFilter) &&
-        (!query ||
-          [row.name, stateName(row.state), reminderDetail(row)]
-            .join(" ")
-            .toLocaleLowerCase("ru-RU")
-            .includes(query)),
-    );
-  }, [reminders, queries.reminders, stateFilter]);
-  const status = statuses[tab];
-  const sourceCount = tab === "activity" ? activities.length : reminders.length;
-  const filteredCount =
-    tab === "activity" ? filteredActivities.length : filteredReminders.length;
-  const actionRows = filteredActivities.slice(0, visibleCount);
-  const reminderRows = filteredReminders.slice(0, visibleCount);
-  const metrics =
-    tab === "activity"
-      ? [
-          ["Загружено записей", activities.length],
-          [
-            "Платежи",
-            activities.filter(
-              (row) => actionInfo(row.action).category === "payments",
-            ).length,
-          ],
-          [
-            "Пользователи",
-            activities.filter(
-              (row) => actionInfo(row.action).category === "users",
-            ).length,
-          ],
-          [
-            "Вход и выход",
-            activities.filter(
-              (row) => actionInfo(row.action).category === "access",
-            ).length,
-          ],
-        ]
-      : [
-          ["Загружено записей", reminders.length],
-          [
-            "Отправлено",
-            reminders.filter((row) => row.state === "sent").length,
-          ],
-          [
-            "В обработке",
-            reminders.filter((row) =>
-              ["pending", "sending", "retry"].includes(row.state),
-            ).length,
-          ],
-          [
-            "Требуют проверки",
-            reminders.filter((row) => row.state === "unknown").length,
-          ],
-        ];
-
   const changeTab = (next: Tab) => {
     setTab(next);
-    setVisibleCount(PAGE_SIZE);
   };
   const onTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
     let next: Tab | null = null;
@@ -366,7 +225,7 @@ export default function ActivityPanel({ timezone }: { timezone: string }) {
     setQueries((previous) => ({ ...previous, [tab]: "" }));
     if (tab === "activity") setCategory("all");
     else setStateFilter("all");
-    setVisibleCount(PAGE_SIZE);
+    setOffset(0);
   };
   const stateBadge = (row: ReminderRecord) => {
     const state = Object.hasOwn(reminderStates, row.state)
@@ -417,36 +276,20 @@ export default function ActivityPanel({ timezone }: { timezone: string }) {
         <button
           className="activity-panel__button activity-panel__refresh"
           type="button"
-          disabled={status.loading}
-          onClick={() => {
-            void load(tab);
-          }}
+          disabled={loading}
+          onClick={current.reload}
         >
           <RefreshCw
             size={16}
             aria-hidden="true"
-            className={status.loading ? "activity-panel__spin" : undefined}
+            className={loading ? "activity-panel__spin" : undefined}
           />
-          {status.loading && status.loaded ? "Обновляем…" : "Обновить"}
+          {loading ? "Загружаем…" : "Обновить"}
         </button>
       </div>
       <p className="activity-panel__scope">
-        Последние 100 записей · время {timezone}
+        По 30 записей на страницу · время {timezone}
       </p>
-
-      {status.loaded && (
-        <dl
-          className="activity-panel__metrics"
-          aria-label="Показатели загруженной выборки"
-        >
-          {metrics.map(([label, count]) => (
-            <div key={label}>
-              <dt>{label}</dt>
-              <dd>{count}</dd>
-            </div>
-          ))}
-        </dl>
-      )}
 
       {(["activity", "reminders"] as const).map((kind) => (
         <div
@@ -455,7 +298,7 @@ export default function ActivityPanel({ timezone }: { timezone: string }) {
           role="tabpanel"
           aria-labelledby={`${id}-${kind}-tab`}
           hidden={tab !== kind}
-          aria-busy={statuses[kind].loading}
+          aria-busy={tab === kind && loading}
           tabIndex={0}
         >
           {tab === kind && (
@@ -474,7 +317,7 @@ export default function ActivityPanel({ timezone }: { timezone: string }) {
                       value={category}
                       onChange={(event) => {
                         setCategory(event.target.value as Category);
-                        setVisibleCount(PAGE_SIZE);
+                        setOffset(0);
                       }}
                     >
                       <option value="all">Все действия</option>
@@ -488,7 +331,7 @@ export default function ActivityPanel({ timezone }: { timezone: string }) {
                       value={stateFilter}
                       onChange={(event) => {
                         setStateFilter(event.target.value);
-                        setVisibleCount(PAGE_SIZE);
+                        setOffset(0);
                       }}
                     >
                       <option value="all">Все состояния</option>
@@ -507,31 +350,31 @@ export default function ActivityPanel({ timezone }: { timezone: string }) {
                   <span className="activity-panel__sr">
                     {tab === "activity"
                       ? "Поиск по имени, действию или описанию"
-                      : "Поиск по платежу или состоянию напоминания"}
+                      : "Поиск по названию платежа"}
                   </span>
                   <Search size={17} aria-hidden="true" />
                   <input
                     id={`${id}-search`}
                     type="search"
-                    maxLength={256}
+                    maxLength={160}
                     value={queries[tab]}
                     placeholder={
                       tab === "activity"
                         ? "Имя, платёж или действие"
-                        : "Название платежа или состояние"
+                        : "Название платежа"
                     }
                     onChange={(event) => {
                       setQueries((previous) => ({
                         ...previous,
                         [tab]: event.target.value,
                       }));
-                      setVisibleCount(PAGE_SIZE);
+                      setOffset(0);
                     }}
                   />
                 </label>
               </div>
 
-              {status.error && (
+              {current.error && (
                 <div className="activity-panel__error" role="alert">
                   <CircleAlert size={20} aria-hidden="true" />
                   <div>
@@ -539,24 +382,19 @@ export default function ActivityPanel({ timezone }: { timezone: string }) {
                       Не удалось обновить{" "}
                       {tab === "activity" ? "журнал" : "напоминания"}
                     </strong>
-                    <p>{status.error}</p>
-                    {status.loaded && (
-                      <p>Показаны данные последней успешной загрузки.</p>
-                    )}
+                    <p>{current.error}</p>
                   </div>
                   <button
                     type="button"
                     className="activity-panel__button"
-                    disabled={status.loading}
-                    onClick={() => {
-                      void load(tab);
-                    }}
+                    disabled={loading}
+                    onClick={current.reload}
                   >
                     Повторить
                   </button>
                 </div>
               )}
-              {status.loading && !status.loaded ? (
+              {loading ? (
                 <div className="activity-panel__empty" role="status">
                   <LoaderCircle
                     size={28}
@@ -567,7 +405,7 @@ export default function ActivityPanel({ timezone }: { timezone: string }) {
                     Загружаем {tab === "activity" ? "действия" : "напоминания"}…
                   </p>
                 </div>
-              ) : status.loaded && filteredCount === 0 ? (
+              ) : current.page && rowCount === 0 ? (
                 <div className="activity-panel__empty">
                   {tab === "activity" ? (
                     <FileClock size={30} aria-hidden="true" />
@@ -575,20 +413,20 @@ export default function ActivityPanel({ timezone }: { timezone: string }) {
                     <Bell size={30} aria-hidden="true" />
                   )}
                   <h3>
-                    {sourceCount
+                    {hasFilters
                       ? "Ничего не найдено"
                       : tab === "activity"
                         ? "В журнале пока пусто"
                         : "Напоминаний пока нет"}
                   </h3>
                   <p>
-                    {sourceCount
+                    {hasFilters
                       ? "Измените запрос или сбросьте фильтры."
                       : tab === "activity"
                         ? "Здесь появятся входы в модуль и изменения платежей и пользователей."
                         : "Задания появляются за три дня до срока неоплаченного периода."}
                   </p>
-                  {sourceCount > 0 && (
+                  {hasFilters && (
                     <button
                       className="activity-panel__button"
                       type="button"
@@ -599,15 +437,8 @@ export default function ActivityPanel({ timezone }: { timezone: string }) {
                   )}
                 </div>
               ) : (
-                status.loaded && (
+                current.page && (
                   <>
-                    <div
-                      className="activity-panel__results"
-                      role="status"
-                      aria-live="polite"
-                    >
-                      {filteredCount} из {sourceCount} записей
-                    </div>
                     {tab === "activity" ? (
                       <>
                         <div className="activity-panel__desktop">
@@ -775,30 +606,16 @@ export default function ActivityPanel({ timezone }: { timezone: string }) {
                         </ol>
                       </>
                     )}
-                    <div className="activity-panel__footer">
-                      <span>
-                        Показано {Math.min(visibleCount, filteredCount)} из{" "}
-                        {filteredCount}
-                      </span>
-                      {visibleCount < filteredCount && (
-                        <button
-                          type="button"
-                          className="activity-panel__button"
-                          onClick={() =>
-                            setVisibleCount((previous) => previous + PAGE_SIZE)
-                          }
-                        >
-                          Показать ещё
-                        </button>
-                      )}
-                    </div>
                   </>
                 )
               )}
-              {status.updatedAt && (
-                <p className="activity-panel__updated">
-                  Загружено {stamp(status.updatedAt)}
-                </p>
+              {(current.page || loading) && (
+                <Pagination
+                  page={current.page}
+                  offset={offsets[tab]}
+                  onOffset={setOffset}
+                  loading={loading}
+                />
               )}
             </div>
           )}

@@ -70,11 +70,11 @@ def configure(client, token, chat_id, profile, expected_bot, photo=None):
             if api_call(client, token, method, {key: profile[key], "language_code": language}) is not True:
                 raise ProfileError("profile_update_not_confirmed")
         api_call(client, token, "setMyCommands", {"commands": public_commands, "language_code": language})
-        api_call(client, token, "setMyCommands", {"commands": public_commands, "language_code": language,
+        api_call(client, token, "setMyCommands", {"commands": profile["commands"], "language_code": language,
                                                  "scope": {"type": "all_private_chats"}})
         api_call(client, token, "setMyCommands", {"commands": public_commands, "language_code": language,
                                                  "scope": {"type": "all_group_chats"}})
-        api_call(client, token, "setMyCommands", {"commands": profile["commands"], "language_code": language,
+        api_call(client, token, "setMyCommands", {"commands": public_commands, "language_code": language,
                                                  "scope": {"type": "all_chat_administrators"}})
         # Remove the previous release's per-chat finance menu. This ID is only
         # for command cleanup, never a notification destination or access grant.
@@ -93,9 +93,9 @@ def configure(client, token, chat_id, profile, expected_bot, photo=None):
                 raise ProfileError("profile_readback_mismatch")
         if api_call(client, token, "getMyCommands", {"language_code": language}) != public_commands:
             raise ProfileError("public_commands_readback_mismatch")
-        for scope, expected in (({"type": "all_private_chats"}, public_commands),
+        for scope, expected in (({"type": "all_private_chats"}, profile["commands"]),
                                 ({"type": "all_group_chats"}, public_commands),
-                                ({"type": "all_chat_administrators"}, profile["commands"])):
+                                ({"type": "all_chat_administrators"}, public_commands)):
             if api_call(client, token, "getMyCommands", {"language_code": language,"scope": scope}) != expected:
                 raise ProfileError("commands_readback_mismatch")
         if chat_id and api_call(client, token, "getMyCommands", {"language_code": language,

@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import BrandIcon from "./BrandIcon";
 import type { Occurrence } from "./api";
+import { Pagination, useDebounced, usePage } from "./DataControls";
 import {
   currencies,
   dateLabel,
@@ -26,10 +27,9 @@ import {
 } from "./ui";
 
 export default function Payments({
-  items,
   today,
   month,
-  loading,
+  revision,
   history,
   isAdmin,
   onAdd,
@@ -37,10 +37,9 @@ export default function Payments({
   onSelect,
   onPay,
 }: {
-  items: Occurrence[];
   today: string;
   month: string;
-  loading: boolean;
+  revision: number;
   history: boolean;
   isAdmin: boolean;
   onAdd: () => void;
@@ -53,6 +52,22 @@ export default function Payments({
   const [currency, setCurrency] = useState("all");
   const [sortBy, setSortBy] = useState("due_date");
   const [descending, setDescending] = useState(false);
+  const query = useDebounced(search.trim());
+  const queryKey = JSON.stringify([
+    month,
+    status,
+    currency,
+    sortBy,
+    descending,
+    query,
+  ]);
+  const [paging, setPaging] = useState({ key: "", offset: 0 });
+  const offset = paging.key === queryKey ? paging.offset : 0;
+  const { page, loading, error, reload } = usePage<Occurrence>(
+    `/payment-occurrences/page?${new URLSearchParams({ month, status, currency, search: query, sort: sortBy, descending: String(descending), limit: "30", offset: String(offset) })}`,
+    revision,
+  );
+  const items = page?.items || [];
   const hasFilters =
     Boolean(search.trim()) || status !== "all" || currency !== "all";
   const resetFilters = () => {
@@ -60,37 +75,14 @@ export default function Payments({
     setStatus("all");
     setCurrency("all");
   };
-  const displayItems = items
-    .filter(
-      (i) =>
-        (status === "all" || i.status === status) &&
-        (currency === "all" || i.currency === currency) &&
-        `${i.name} ${isAdmin ? i.owner_name || "" : ""}`
-          .toLocaleLowerCase("ru")
-          .includes(search.trim().toLocaleLowerCase("ru")),
-    )
-    .sort((a, b) => {
-      // Amounts are ordered within each currency; no exchange rate is implied.
-      if (sortBy === "amount" && a.currency !== b.currency)
-        return a.currency.localeCompare(b.currency);
-      const comparison =
-        sortBy === "name"
-          ? a.name.localeCompare(b.name, "ru")
-          : sortBy === "amount"
-            ? Number(a.amount) - Number(b.amount)
-            : a.due_date.localeCompare(b.due_date);
-      return (
-        (descending ? -comparison : comparison) ||
-        a.name.localeCompare(b.name, "ru")
-      );
-    });
+  const displayItems = items;
   return (
     <section className="payments-card">
       <div className="table-card-heading">
         <div>
           <h2>
             {history ? "Платежи за период" : "Платежи за месяц"}{" "}
-            <span>{items.length}</span>
+            <span>{page?.total ?? "—"}</span>
           </h2>
           <p>
             {history
@@ -110,13 +102,13 @@ export default function Payments({
           </button>
           <button
             className="button secondary small"
-            aria-label="Экспорт CSV"
-            title="Экспорт CSV"
+            aria-label="Экспорт текущей страницы в CSV"
+            title="Экспорт текущей страницы в CSV"
             onClick={() => downloadCSV(displayItems, month)}
             disabled={!displayItems.length}
           >
             <Download size={15} />
-            <span>Экспорт CSV</span>
+            <span>CSV страницы</span>
           </button>
         </div>
       </div>
@@ -135,12 +127,6 @@ export default function Payments({
               onClick={() => setStatus(tab.id)}
             >
               {tab.label}
-              {tab.id === "overdue" &&
-                items.filter((i) => i.status === "overdue").length > 0 && (
-                  <span>
-                    {items.filter((i) => i.status === "overdue").length}
-                  </span>
-                )}
             </button>
           ))}
         </div>
@@ -150,6 +136,7 @@ export default function Payments({
             <input
               aria-label="Найти платёж"
               type="search"
+              maxLength={160}
               placeholder={
                 isAdmin ? "Платёж или ответственный" : "Название платежа"
               }
@@ -231,6 +218,13 @@ export default function Payments({
       {loading && !items.length ? (
         <div className="loading-block">
           <LoaderCircle className="spin" /> Загружаем платежи…
+        </div>
+      ) : error ? (
+        <div className="data-list-error" role="alert">
+          {error}
+          <button className="text-button" onClick={reload}>
+            Повторить
+          </button>
         </div>
       ) : displayItems.length ? (
         <>
@@ -474,14 +468,12 @@ export default function Payments({
           }
         />
       )}
-      <div className="table-footer">
-        <span aria-live="polite" aria-atomic="true">
-          <span className="footer-status-dot" />{" "}
-          {displayItems.length
-            ? `Показано ${displayItems.length} из ${items.length} платежей`
-            : "Данные за выбранный период"}
-        </span>
-      </div>
+      <Pagination
+        page={page}
+        offset={offset}
+        onOffset={(value) => setPaging({ key: queryKey, offset: value })}
+        loading={loading}
+      />
     </section>
   );
 }

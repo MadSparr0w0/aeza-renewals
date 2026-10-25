@@ -8,7 +8,7 @@ from scripts.configure_telegram import ProfileError, api_call, configure, read_p
 
 def test_profile_public_and_chat_scopes_and_readback():
     profile = read_profile(ROOT / "assets/telegram/profile.json")
-    assert {item["command"] for item in profile["commands"]} == {"start", "help", "connect"}
+    assert {item["command"] for item in profile["commands"]} == {"start", "login", "menu", "payments", "history", "summary", "chats", "help"}
     public = [item for item in profile["commands"] if item["command"] in {"start", "help"}]
     requests = []
 
@@ -24,7 +24,7 @@ def test_profile_public_and_chat_scopes_and_readback():
             result = {key: profile[key]}
         elif method == "getMyCommands":
             scope = payload.get("scope",{}).get("type")
-            result = [] if scope == "chat" else profile["commands"] if scope == "all_chat_administrators" else public
+            result = [] if scope == "chat" else profile["commands"] if scope == "all_private_chats" else public
         elif method == "getChatMenuButton":
             result = {"type": "commands"}
         elif method == "getUserProfilePhotos":
@@ -37,7 +37,8 @@ def test_profile_public_and_chat_scopes_and_readback():
     writes = [payload for method, payload in requests if method == "setMyCommands"]
     assert len(writes) == 8
     assert all(payload["commands"] == public for payload in writes if not payload.get("scope"))
-    assert all(payload["commands"] == profile["commands"] for payload in writes if payload.get("scope",{}).get("type") == "all_chat_administrators")
+    assert all(payload["commands"] == profile["commands"] for payload in writes if payload.get("scope",{}).get("type") == "all_private_chats")
+    assert all(payload["commands"] == public for payload in writes if payload.get("scope",{}).get("type") in {"all_group_chats","all_chat_administrators"})
     deletes = [payload for method,payload in requests if method == "deleteMyCommands"]
     assert len(deletes) == 2 and all(p["scope"] == {"type":"chat","chat_id":"456"} for p in deletes)
     assert not any(method == "getChat" for method,_ in requests)

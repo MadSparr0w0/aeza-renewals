@@ -7,6 +7,13 @@ export type User = {
   env_managed: boolean;
 };
 export type Session = { user: User; csrf_token: string };
+export type Page<T> = {
+  items: T[];
+  total: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
+};
 export type Occurrence = {
   id: number;
   recurring_payment_id: number;
@@ -57,12 +64,22 @@ export type Summary = {
   paid_count: number;
   unpaid_count: number;
   overdue_count: number;
+  counts_by_currency: Record<
+    Currency,
+    {
+      total_count: number;
+      paid_count: number;
+      unpaid_count: number;
+      overdue_count: number;
+    }
+  >;
 };
 export type Settings = {
   timezone: string;
   today: string;
   telegram_configured: boolean;
   reminder_days: number;
+  active_count: number;
 };
 export class ApiError extends Error {
   status: number;
@@ -91,7 +108,12 @@ export async function api<T>(
         ...options.headers,
       },
     });
-  } catch {
+  } catch (error) {
+    if (
+      options.signal?.aborted ||
+      (error instanceof DOMException && error.name === "AbortError")
+    )
+      throw error;
     throw new ApiError(
       "Не удалось связаться с сервером. Проверьте соединение и повторите попытку.",
       0,

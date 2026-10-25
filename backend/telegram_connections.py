@@ -1,4 +1,4 @@
-"""One confirmed Telegram group per isolated team, with fixed recipients.
+"""Explicitly selected corporate groups and immutable delivery recipients.
 
 The environment's legacy chat ID never activates delivery. Binding a group
 requires a code from the web administrator, a group administrator, and a final
@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .db import audit, connect, transaction, utcnow
 
 LINK_SECONDS = 600
+MAX_DESTINATIONS = 20
 GROUP_TYPES = frozenset({'group', 'supergroup'})
 
 
@@ -89,18 +90,36 @@ def initialize_telegram(db, settings):
         db.execute('DROP TABLE reminder_outbox')
         db.execute('ALTER TABLE reminder_outbox_group RENAME TO reminder_outbox')
     db.execute('CREATE INDEX IF NOT EXISTS ix_outbox_delivery ON reminder_outbox(state,recipient_chat_id,delivery_scope)')
+    db.execute('''CREATE TABLE IF NOT EXISTS telegram_destinations (
+      chat_id TEXT PRIMARY KEY, team_id INTEGER NOT NULL REFERENCES users(id), chat_title TEXT NOT NULL, chat_type TEXT NOT NULL,
+      bot_scope TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,
+      connected_at TEXT NOT NULL, connected_on TEXT NOT NULL,
+      connected_by INTEGER NOT NULL, unavailable_reason TEXT)''')
+    db.execute('''CREATE TABLE IF NOT EXISTS telegram_chat_selections (
+      request_id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      telegram_id TEXT NOT NULL, team_id INTEGER NOT NULL REFERENCES users(id), bot_scope TEXT NOT NULL, created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN
+      ('pending','checking','candidate','confirmed','cancelled')), chat_id TEXT, chat_title TEXT, chat_type TEXT)''')
+    db.execute('CREATE INDEX IF NOT EXISTS ix_chat_selections_expiry ON telegram_chat_selections(expires_at)')
+    db.execute('''INSERT OR IGNORE INTO telegram_destinations
+      SELECT chat_id,id,chat_title,chat_type,bot_scope,active,connected_at,connected_on,connected_by,unavailable_reason
+      FROM telegram_connection''')
+    db.execute('DROP VIEW IF EXISTS telegram_active_destinations')
+    db.execute('''CREATE VIEW telegram_active_destinations AS
+      SELECT team_id AS id,chat_id,chat_title,chat_type,bot_scope,active,connected_at,connected_on,connected_by,unavailable_reason
+      FROM telegram_destinations WHERE active=1
+      UNION ALL SELECT * FROM telegram_connection old WHERE active=1
+      AND NOT EXISTS(SELECT 1 FROM telegram_destinations d WHERE d.chat_id=old.chat_id)''')
 
 
 def active_connection(db, settings=None, team_id=None):
-    if team_id is None:
-        row = db.execute("SELECT * FROM telegram_connection WHERE active=1 AND chat_type IN ('group','supergroup') ORDER BY id LIMIT 1").fetchone()
-    else:
-        row = db.execute("SELECT * FROM telegram_connection WHERE id=? AND active=1 AND chat_type IN ('group','supergroup')", (team_id,)).fetchone()
-    if row is None or group_id(row['chat_id']) is None:
-        return None
-    if settings is not None and (not settings.telegram_bot_token or row['bot_scope'] != token_scope(settings.telegram_bot_token)):
-        return None
-    return row
+    return next(iter(active_connections(db,settings,team_id)),None)
+
+
+def active_connections(db,settings=None,team_id=None):
+    rows=db.execute("SELECT * FROM telegram_active_destinations WHERE chat_type IN ('group','supergroup') AND (? IS NULL OR id=?) ORDER BY connected_at,chat_id",(team_id,team_id)).fetchall()
+    return [r for r in rows if group_id(r['chat_id']) is not None and
+      (settings is None or (settings.telegram_bot_token and r['bot_scope']==token_scope(settings.telegram_bot_token)))]
 
 
 def is_connected(db, settings=None, team_id=None):
@@ -113,9 +132,14 @@ def recover_expired_deliveries(db, now):
 
 
 def schedule_group_reminders(db, today, owner_id=None):
+    for row in active_connections(db):
+        schedule_destination(db,today,row,owner_id)
+
+
+def schedule_destination(db,today,row,owner_id=None):
     cutoff = (today + timedelta(days=3)).isoformat()
     scope = '' if owner_id is None else ' AND r.owner_id=?'
-    params = [utcnow(), cutoff]
+    params = [utcnow(), row['chat_id'], cutoff]
     if owner_id is not None:
         params.append(owner_id)
     # Each owner is routed only to its team's confirmed group. A new group
@@ -125,9 +149,9 @@ def schedule_group_reminders(db, today, owner_id=None):
       SELECT o.id,'pending',?,c.chat_id,c.bot_scope FROM payment_occurrences o
       JOIN recurring_payments r ON r.id=o.recurring_payment_id
       JOIN users owner ON owner.id=r.owner_id
-      JOIN telegram_connection c ON c.id=owner.team_id AND c.active=1
+      JOIN telegram_active_destinations c ON c.id=owner.team_id AND c.active=1
         AND c.chat_type IN ('group','supergroup')
-      WHERE o.is_paid=0 AND r.active=1 AND o.due_date<=?
+      WHERE c.chat_id=? AND o.is_paid=0 AND r.active=1 AND o.due_date<=?
       AND (o.due_date>=c.connected_on OR r.created_at>=c.connected_at)
       AND NOT EXISTS(SELECT 1 FROM reminder_outbox prior WHERE prior.occurrence_id=o.id
         AND prior.recipient_chat_id=c.chat_id AND prior.state IN ('sent','unknown','sending'))''' + scope, params)
@@ -145,7 +169,7 @@ def schedule_group_reminders(db, today, owner_id=None):
       AND EXISTS (SELECT 1 FROM payment_occurrences o
         JOIN recurring_payments r ON r.id=o.recurring_payment_id
         JOIN users owner ON owner.id=r.owner_id
-        JOIN telegram_connection c ON c.id=owner.team_id AND c.active=1
+        JOIN telegram_active_destinations c ON c.id=owner.team_id AND c.active=1
           AND c.chat_type IN ('group','supergroup')
         WHERE o.id=reminder_outbox.occurrence_id AND o.is_paid=0 AND r.active=1
           AND o.due_date<=? AND (o.due_date>=c.connected_on OR r.created_at>=c.connected_at)
@@ -214,8 +238,9 @@ def confirm_link(db, settings, user, request_id, now=None):
       JOIN recurring_payments r ON r.id=o.recurring_payment_id JOIN users owner ON owner.id=r.owner_id
       WHERE b.state='sending' AND owner.team_id=? LIMIT 1""", (user['team_id'],)).fetchone():
         raise HTTPException(409,'Дождитесь завершения текущего уведомления и повторите подключение.')
-    if db.execute("SELECT 1 FROM telegram_connection WHERE id<>? AND chat_id=? AND active=1", (user['team_id'],row['chat_id'])).fetchone():
+    if db.execute("SELECT 1 FROM telegram_active_destinations WHERE id<>? AND chat_id=?", (user['team_id'],row['chat_id'])).fetchone():
         raise HTTPException(409,'Эта группа уже подключена к другой команде.')
+    db.execute('UPDATE telegram_connection SET active=0 WHERE chat_id=? AND id<>?',(row['chat_id'],user['team_id']))
     db.execute("""UPDATE reminder_outbox SET state='cancelled',last_error='chat_disconnected',lease_owner=NULL,lease_until=NULL
       WHERE state IN ('pending','retry') AND (recipient_chat_id IS NULL OR delivery_scope IS NULL OR recipient_chat_id<>? OR delivery_scope<>?)
       AND occurrence_id IN (SELECT o.id FROM payment_occurrences o JOIN recurring_payments r ON r.id=o.recurring_payment_id
@@ -225,6 +250,14 @@ def confirm_link(db, settings, user, request_id, now=None):
       chat_type=excluded.chat_type,bot_scope=excluded.bot_scope,active=1,connected_at=excluded.connected_at,
       connected_on=excluded.connected_on,connected_by=excluded.connected_by,unavailable_reason=NULL''',
                (user['team_id'],row['chat_id'],row['chat_title'],row['chat_type'],row['bot_scope'],utcnow(),settings.today.isoformat(),user['id']))
+    # The legacy web wizard replaces the single destination. The bot's /chats
+    # menu can subsequently enable several groups without redirecting jobs.
+    db.execute('UPDATE telegram_destinations SET active=0 WHERE team_id=?',(user['team_id'],))
+    db.execute('''INSERT INTO telegram_destinations VALUES(?,?,?,?,?,1,?,?,?,NULL)
+      ON CONFLICT(chat_id) DO UPDATE SET team_id=excluded.team_id,chat_title=excluded.chat_title,chat_type=excluded.chat_type,
+      bot_scope=excluded.bot_scope,active=1,connected_at=excluded.connected_at,
+      connected_on=excluded.connected_on,connected_by=excluded.connected_by,unavailable_reason=NULL''',
+      (row['chat_id'],user['team_id'],row['chat_title'],row['chat_type'],row['bot_scope'],utcnow(),settings.today.isoformat(),user['id']))
     db.execute("UPDATE telegram_link_requests SET state='confirmed' WHERE id=?",(row['id'],))
     audit(db,user,'telegram_connected','Подключён корпоративный чат: '+row['chat_title'])
     schedule_group_reminders(db,settings.today)
@@ -234,6 +267,8 @@ def confirm_link(db, settings, user, request_id, now=None):
 def disconnect(db, user=None, reason='chat_disconnected', team_id=None):
     team_id = team_id or (user['team_id'] if user else db.execute("SELECT id FROM users WHERE env_managed=1").fetchone()['id'])
     db.execute('UPDATE telegram_connection SET active=0,unavailable_reason=? WHERE id=?',(reason,team_id))
+    db.execute('UPDATE telegram_destinations SET active=0,unavailable_reason=? WHERE team_id=?',(reason,team_id))
+    db.execute("UPDATE telegram_chat_selections SET state='cancelled' WHERE team_id=? AND state IN ('pending','checking','candidate')",(team_id,))
     db.execute("UPDATE telegram_link_requests SET state='revoked' WHERE team_id=? AND state IN ('pending','candidate')",(team_id,))
     db.execute("""UPDATE reminder_outbox SET state='cancelled',last_error=?,lease_owner=NULL,lease_until=NULL
       WHERE state IN ('pending','retry') AND occurrence_id IN
@@ -243,12 +278,125 @@ def disconnect(db, user=None, reason='chat_disconnected', team_id=None):
         audit(db,user,'telegram_disconnected','Корпоративный чат отключён')
 
 
+def disable_destination(db,cid,user=None,reason='chat_disconnected'):
+    if user and not db.execute('SELECT 1 FROM telegram_destinations WHERE chat_id=? AND team_id=?',(cid,user['team_id'])).fetchone():
+        raise HTTPException(404,'Группа не найдена.')
+    db.execute('UPDATE telegram_destinations SET active=0,unavailable_reason=? WHERE chat_id=?',(reason,cid))
+    db.execute('UPDATE telegram_connection SET active=0,unavailable_reason=? WHERE chat_id=?',(reason,cid))
+    db.execute("UPDATE reminder_outbox SET state='cancelled',last_error=?,lease_owner=NULL,lease_until=NULL WHERE recipient_chat_id=? AND state IN ('pending','retry')",(reason,cid))
+    db.execute("UPDATE telegram_link_requests SET state='revoked' WHERE chat_id=? AND state IN ('pending','candidate')",(cid,))
+    db.execute("UPDATE telegram_chat_selections SET state='cancelled' WHERE chat_id=? AND state IN ('pending','checking','candidate')",(cid,))
+    if user:audit(db,user,'telegram_disconnected','Отключена группа Telegram')
+
+
+def require_private_admin(db, user_id, telegram_id):
+    row = db.execute('''SELECT u.* FROM users u JOIN telegram_identities i ON i.user_id=u.id
+      WHERE u.id=? AND u.role='admin' AND i.telegram_id=?''', (user_id, str(telegram_id))).fetchone()
+    if row is None:
+        raise HTTPException(403, 'Управление группами доступно привязанному администратору.')
+    return row
+
+
+def request_chat_selection(db, settings, user_id, telegram_id, now=None):
+    now = int(time.time()) if now is None else now
+    with transaction(db):
+        user=require_private_admin(db, user_id, telegram_id)
+        db.execute('DELETE FROM telegram_chat_selections WHERE expires_at<?', (now - 86400,))
+        db.execute("UPDATE telegram_chat_selections SET state='cancelled' WHERE user_id=? AND telegram_id=? AND state IN ('pending','checking','candidate')", (user_id, str(telegram_id)))
+        identifier = secrets.randbelow(2**31 - 1) + 1
+        while db.execute('SELECT 1 FROM telegram_chat_selections WHERE request_id=?', (identifier,)).fetchone():
+            identifier = secrets.randbelow(2**31 - 1) + 1
+        db.execute('''INSERT INTO telegram_chat_selections
+          (request_id,user_id,telegram_id,team_id,bot_scope,created_at,expires_at,state)
+          VALUES(?,?,?,?,?,?,?,'pending')''', (identifier,user_id,str(telegram_id),user['team_id'],token_scope(settings.telegram_bot_token),now,now+LINK_SECONDS))
+    return identifier
+
+
+def selection_row(db, settings, user_id, telegram_id, request_id, state, now):
+    user=require_private_admin(db, user_id, telegram_id)
+    if isinstance(request_id, bool) or not isinstance(request_id, int) or not 0 < request_id < 2**31:
+        raise HTTPException(404, 'Выбор группы недействителен. Откройте /chats заново.')
+    row = db.execute('''SELECT * FROM telegram_chat_selections WHERE request_id=? AND user_id=?
+      AND telegram_id=? AND team_id=? AND bot_scope=? AND state=? AND expires_at>?''',
+      (request_id,user_id,str(telegram_id),user['team_id'],token_scope(settings.telegram_bot_token),state,now)).fetchone()
+    if row is None:
+        raise HTTPException(404, 'Выбор группы истёк или уже использован. Откройте /chats заново.')
+    return row
+
+
+def claim_chat_selection(db, settings, user_id, telegram_id, request_id, cid, now=None):
+    now = int(time.time()) if now is None else now
+    cid = group_id(cid)
+    if cid is None:
+        raise HTTPException(422, 'Выберите группу или супергруппу.')
+    with transaction(db):
+        selection_row(db,settings,user_id,telegram_id,request_id,'pending',now)
+        db.execute("UPDATE telegram_chat_selections SET state='checking',chat_id=? WHERE request_id=?", (cid,request_id))
+    return cid
+
+
+def record_chat_selection(db, settings, user_id, telegram_id, request_id, details, now=None):
+    now = int(time.time()) if now is None else now
+    with transaction(db):
+        row = selection_row(db,settings,user_id,telegram_id,request_id,'checking',now)
+        if group_id(details.get('id')) != row['chat_id'] or details.get('type') not in GROUP_TYPES:
+            raise HTTPException(422, 'Telegram не подтвердил выбранную группу.')
+        db.execute("UPDATE telegram_chat_selections SET state='candidate',chat_title=?,chat_type=? WHERE request_id=?",
+                   (str(details.get('title') or 'Корпоративная группа')[:160],details['type'],request_id))
+
+
+def enable_chat_selection(db, settings, user_id, telegram_id, request_id, now=None):
+    now = int(time.time()) if now is None else now
+    with transaction(db):
+        user = require_private_admin(db,user_id,telegram_id)
+        row = selection_row(db,settings,user_id,telegram_id,request_id,'candidate',now)
+        existing = db.execute('SELECT * FROM telegram_destinations WHERE chat_id=?', (row['chat_id'],)).fetchone()
+        if db.execute('SELECT 1 FROM telegram_active_destinations WHERE chat_id=? AND id<>?',(row['chat_id'],user['team_id'])).fetchone():
+            raise HTTPException(409,'Эта группа уже подключена к другой команде.')
+        if existing and existing['active'] and existing['bot_scope'] == row['bot_scope']:
+            db.execute("UPDATE telegram_chat_selections SET state='confirmed' WHERE request_id=?", (request_id,))
+            return
+        recover_expired_deliveries(db,now)
+        if db.execute("SELECT 1 FROM reminder_outbox WHERE recipient_chat_id=? AND state='sending'", (row['chat_id'],)).fetchone():
+            raise HTTPException(409, 'Дождитесь завершения отправки в эту группу.')
+        if len(active_connections(db,settings,user['team_id'])) >= MAX_DESTINATIONS:
+            raise HTTPException(409, 'Можно выбрать не более 20 групп. Сначала отключите одну из них.')
+        db.execute('UPDATE telegram_connection SET active=0 WHERE chat_id=? AND id<>?',(row['chat_id'],user['team_id']))
+        db.execute('''INSERT INTO telegram_destinations
+          (chat_id,team_id,chat_title,chat_type,bot_scope,active,connected_at,connected_on,connected_by,unavailable_reason)
+          VALUES(?,?,?,?,?,1,?,?,?,NULL) ON CONFLICT(chat_id) DO UPDATE SET
+          team_id=excluded.team_id,chat_title=excluded.chat_title,chat_type=excluded.chat_type,bot_scope=excluded.bot_scope,
+          active=1,connected_at=excluded.connected_at,connected_on=excluded.connected_on,
+          connected_by=excluded.connected_by,unavailable_reason=NULL''',
+          (row['chat_id'],user['team_id'],row['chat_title'],row['chat_type'],row['bot_scope'],utcnow(),settings.today.isoformat(),user_id))
+        db.execute("UPDATE telegram_chat_selections SET state='confirmed' WHERE request_id=?", (request_id,))
+        audit(db,user,'telegram_connected','Выбрана группа для уведомлений: '+row['chat_title'])
+        destination = db.execute('SELECT *,team_id AS id FROM telegram_destinations WHERE chat_id=?', (row['chat_id'],)).fetchone()
+        schedule_destination(db,settings.today,destination)
+
+
 class ConfirmLink(BaseModel):
     model_config = ConfigDict(extra='forbid',title='Подтверждение корпоративной группы')
     request_id: int = Field(gt=0,strict=True,title='Идентификатор запроса подключения',description='Идентификатор действующего кода, по которому бот уже нашёл группу. Возвращается в состоянии подключения.')
 
 
 def register_routes(app, current, admin):
+    @app.get('/api/v1/telegram/destinations',tags=['Система'],summary='Все группы для уведомлений',description='Администратор получает выбранные группы только своей команды. Управление группами доступно в личном кабинете Telegram.')
+    def destinations(request:Request,user=Depends(admin)):
+        cfg=request.app.state.settings
+        with connect(cfg) as db:
+            return {'items':[{'id':r['chat_id'],'title':r['chat_title'],'connected_at':r['connected_at']} for r in active_connections(db,cfg,user['team_id'])],
+              'manage_url':f'https://t.me/{cfg.telegram_bot_username}?start=chats'}
+
+    @app.delete('/api/v1/telegram/destinations/{chat_id}',status_code=204,tags=['Система'],summary='Отключить одну группу',description='Администратор отключает одну выбранную группу своей команды. Отправленные и неоднозначные доставки сохраняются. Требуется CSRF.')
+    def remove_destination(chat_id:str,request:Request,user=Depends(admin)):
+        with connect(request.app.state.settings) as db,transaction(db):
+            if not db.execute('SELECT 1 FROM telegram_destinations WHERE chat_id=? AND team_id=?',(chat_id,user['team_id'])).fetchone():
+                raise HTTPException(404,'Группа не найдена.')
+            recover_expired_deliveries(db,int(time.time()))
+            if db.execute("SELECT 1 FROM reminder_outbox WHERE recipient_chat_id=? AND state='sending'",(chat_id,)).fetchone():
+                raise HTTPException(409,'Дождитесь завершения отправки.')
+            disable_destination(db,chat_id,user)
     @app.get('/api/v1/telegram/connection',tags=['Система'],summary='Подключение корпоративного чата',description='Администратор получает состояние подтверждённой группы и срок текущего кода. Сам код повторно не возвращается.')
     def status(request:Request,user=Depends(admin)):
         cfg=request.app.state.settings

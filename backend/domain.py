@@ -46,16 +46,26 @@ def add_recurring(db, *, name, amount, currency, next_due_date, created_by=None,
     return recurring_id
 
 
-def materialize(db, today: date, horizon: date | None = None, owner_id=None):
+def materialize(db, today: date, horizon: date | None = None, owner_id=None, team_id=None):
     horizon = max(horizon or today, month_end(next_month(today, today.day)))
-    query = "SELECT * FROM recurring_payments WHERE active=1" + (" AND owner_id=?" if owner_id is not None else "")
-    for row in db.execute(query, (owner_id,) if owner_id is not None else ()).fetchall():
-        due = date.fromisoformat(row["next_materialize_date"])
-        while due <= horizon:
-            db.execute("INSERT OR IGNORE INTO payment_occurrences(recurring_payment_id,name,amount_minor,currency,due_date,updated_at) VALUES(?,?,?,?,?,?)",
-                       (row["id"], row["name"], row["amount_minor"], row["currency"], due.isoformat(), utcnow()))
-            due = next_month(due, row["anchor_day"])
-        db.execute("UPDATE recurring_payments SET next_materialize_date=? WHERE id=?", (due.isoformat(), row["id"]))
+    query = "SELECT * FROM recurring_payments WHERE active=1 AND next_materialize_date<=? AND id>?" + (" AND owner_id=?" if owner_id is not None else "") + (' AND owner_id IN (SELECT id FROM users WHERE team_id=?)' if team_id is not None else '') + ' ORDER BY id LIMIT 128'
+    # Never modify a table under an unfinished SELECT cursor. The keyset moves
+    # through bounded batches; already materialized series need no UPDATE.
+    last_id=0
+    while True:
+        args=[horizon.isoformat(),last_id]
+        if owner_id is not None:args.append(owner_id)
+        if team_id is not None:args.append(team_id)
+        rows=db.execute(query,args).fetchall()
+        if not rows:break
+        for row in rows:
+            due = date.fromisoformat(row["next_materialize_date"])
+            while due <= horizon:
+                db.execute("INSERT OR IGNORE INTO payment_occurrences(recurring_payment_id,name,amount_minor,currency,due_date,updated_at) VALUES(?,?,?,?,?,?)",
+                           (row["id"], row["name"], row["amount_minor"], row["currency"], due.isoformat(), utcnow()))
+                due = next_month(due, row["anchor_day"])
+            db.execute("UPDATE recurring_payments SET next_materialize_date=? WHERE id=?", (due.isoformat(), row["id"]))
+        last_id=rows[-1]['id']
 
 
 def occurrence_json(row, today, viewer=None):

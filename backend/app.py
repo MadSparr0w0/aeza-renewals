@@ -21,6 +21,7 @@ from .db import audit, connect, initialize, next_user_id, transaction, utcnow
 from .domain import CURRENCIES, add_recurring, amount_minor, materialize, money, month_end, occurrence_json, schedule_reminders
 from .models import Login, OccurrencePatch, PasswordChange, RecurringCreate, RecurringUpdate, UserCreate, UserPatch
 from .security import csrf_token, digest, hash_password, verify_password
+from . import queries
 
 COOKIE = "ik_session"
 OCCURRENCES = "SELECT o.*,r.active AS recurring_active,r.owner_id,owner.full_name AS owner_name FROM payment_occurrences o JOIN recurring_payments r ON r.id=o.recurring_payment_id JOIN users owner ON owner.id=r.owner_id"
@@ -155,7 +156,7 @@ def create_app(settings: Settings | None = None):
         condition, values = owner_scope(user)
         return db.execute(RECURRING + " WHERE r.id=?" + condition, (payment_id, *values)).fetchone()
 
-    def refresh(db, cfg, month=None, user=None):
+    def refresh(db, cfg, month=None, user=None, schedule=False):
         horizon = None
         if month:
             if not re.fullmatch(r"\d{4}-\d{2}", month):
@@ -168,8 +169,9 @@ def create_app(settings: Settings | None = None):
                 raise HTTPException(422, "Допустимы месяцы от 2000 года до пяти лет вперёд.")
             horizon = month_end(first)
         owner_id = user["id"] if user and user["role"] != "admin" else None
-        materialize(db, cfg.today, horizon, owner_id=owner_id)
-        schedule_reminders(db, cfg.today, owner_id=owner_id)
+        materialize(db, cfg.today, horizon, owner_id=owner_id, team_id=user['team_id'] if user else None)
+        if schedule:
+            schedule_reminders(db, cfg.today, owner_id=owner_id)
 
     def recurring_json(db, row, today, user):
         due = db.execute("SELECT MIN(due_date) FROM payment_occurrences WHERE recurring_payment_id=? AND due_date>=?", (row["id"], today.isoformat())).fetchone()[0]
@@ -279,8 +281,16 @@ def create_app(settings: Settings | None = None):
         with connect(cfg) as db, transaction(db):
             refresh(db, cfg, user=user)
             condition, values = owner_scope(user)
-            rows = db.execute(RECURRING + " WHERE 1=1" + ("" if include_inactive else " AND r.active=1") + condition + " ORDER BY r.id DESC", values).fetchall()
+            rows = db.execute(RECURRING + " WHERE 1=1" + ("" if include_inactive else " AND r.active=1") + condition + " ORDER BY r.id DESC LIMIT 100", values).fetchall()
             return [recurring_json(db, row, cfg.today, user) for row in rows]
+
+    @app.get('/api/v1/recurring-payments/{payment_id}', tags=['Регулярные платежи'], summary='Получить условия одного платежа')
+    def recurring_get(payment_id:int,request:Request,user=Depends(current)):
+        cfg=request.app.state.settings
+        with connect(cfg) as db:
+            row=recurring_row(db,payment_id,user)
+            if row is None:raise HTTPException(404,'Регулярный платёж не найден.')
+            return recurring_json(db,row,cfg.today,user)
 
     @app.post("/api/v1/recurring-payments", status_code=201, tags=["Регулярные платежи"], summary="Добавить регулярный платёж", description="Участник создаёт собственный ежемесячный расход; администратор может указать owner_id другого участника. Автор created_by фиксируется сервером и не подменяется владельцем. Добавляет первый период оплаты. Уведомление направляется только в подтверждённую общую группу за три дня до срока или позже при позднем добавлении.")
     def recurring_create(body: RecurringCreate, request: Request, user=Depends(current)):
@@ -294,7 +304,7 @@ def create_app(settings: Settings | None = None):
             if not db.execute("SELECT 1 FROM users WHERE id=? AND team_id=?", (owner_id, user["team_id"])).fetchone():
                 raise HTTPException(422, "Указанный владелец платежа не найден.")
             recurring_id = add_recurring(db, name=body.name, amount=body.amount, currency=body.currency, next_due_date=body.next_due_date, created_by=user["id"], owner_id=owner_id)
-            refresh(db, cfg, user=user)
+            refresh(db, cfg, user=user, schedule=True)
             audit(db, user, "payment_created", "Добавлен регулярный платёж: " + body.name)
             return recurring_json(db, recurring_row(db, recurring_id, user), cfg.today, user)
 
@@ -347,8 +357,9 @@ def create_app(settings: Settings | None = None):
             conditions.append("r.owner_id=?")
             args.append(user["id"])
         if month:
-            conditions.append("substr(o.due_date,1,7)=?")
-            args.append(month)
+            first=date.fromisoformat(month+'-01')
+            conditions.extend(['o.due_date>=?','o.due_date<=?'])
+            args.extend([first.isoformat(),month_end(first).isoformat()])
         if currency:
             if currency not in CURRENCIES:
                 raise HTTPException(422, "Неизвестная валюта.")
@@ -365,10 +376,35 @@ def create_app(settings: Settings | None = None):
                     conditions.append("o.due_date" + ("<?" if status == "overdue" else ">=?"))
                     args.append(cfg.today.isoformat())
         if search:
-            conditions.append("instr(lower(o.name),lower(?))>0")
+            conditions.append("instr(CASEFOLD(o.name),CASEFOLD(?))>0")
             args.append(search)
         query = OCCURRENCES + (" WHERE " + " AND ".join(conditions) if conditions else "") + " ORDER BY o.due_date,o.id"
-        return db.execute(query, args).fetchall()
+        return db.execute(query+' LIMIT 100', args).fetchall()
+
+    @app.get('/api/v1/payment-occurrences/page', tags=['Периоды оплаты'], summary='Платежи страницами с серверными фильтрами')
+    def occurrence_page(request:Request,month:str|None=None,currency:str|None=None,status:str|None=None,
+        search:str|None=Query(default=None,max_length=160),day:str|None=None,
+        limit:int=Query(default=30,ge=1,le=100),offset:int=Query(default=0,ge=0,le=10000000),
+        sort:str='due_date',descending:bool=False,user=Depends(current)):
+        cfg=request.app.state.settings
+        with connect(cfg) as db,transaction(db):
+            refresh(db,cfg,month,user=user)
+            return queries.page(db,cfg,user,month=month,currency=currency,status=status,search=search,day=day,
+              limit=limit,offset=offset,sort=sort,descending=descending)
+
+    @app.get('/api/v1/payments/calendar', tags=['Итоги'], summary='Итоги календаря по дням без выгрузки всех платежей')
+    def calendar_summary(request:Request,month:str,user=Depends(current)):
+        cfg=request.app.state.settings
+        with connect(cfg) as db,transaction(db):
+            refresh(db,cfg,month,user=user)
+            return queries.calendar(db,cfg,user,month)
+
+    @app.get('/api/v1/payments/insights', tags=['Итоги'], summary='Ближайшие расходы, возможные дубликаты и рост цены')
+    def payment_insights(request:Request,month:str,user=Depends(current)):
+        cfg=request.app.state.settings
+        with connect(cfg) as db,transaction(db):
+            refresh(db,cfg,month,user=user)
+            return queries.insights(db,cfg,user,month)
 
     @app.get("/api/v1/payment-occurrences", tags=["Периоды оплаты"], summary="Получить периоды оплаты", description="Участник получает только периоды своих серий, администратор — периоды своей команды. Ответ содержит владельца, сумму, валюту, срок, отметку, дату и календарную просрочку. История сохраняется независимо от следующего периода.")
     def occurrences(request: Request, month: str | None = Query(default=None, title="Месяц", description="Фильтр по месяцу срока оплаты в формате YYYY-MM. Без параметра возвращаются все созданные периоды."), currency: str | None = Query(default=None, title="Валюта", description="Фильтр по валюте: RUB — рубли, USD — доллары, EUR — евро."), status: str | None = Query(default=None, title="Статус оплаты", description="paid — оплачено, unpaid — не оплачено, overdue — просрочено, pending — срок ещё не прошёл, all — все статусы."), search: str | None = Query(default=None, max_length=160, title="Поиск по названию", description="Текст для поиска внутри названия платежа."), user=Depends(current)):
@@ -415,32 +451,43 @@ def create_app(settings: Settings | None = None):
     @app.get("/api/v1/payments/summary", tags=["Итоги"], summary="Получить итоги по валютам", description="Возвращает плановые, оплаченные, неоплаченные и просроченные суммы, а также количество периодов. RUB, USD и EUR считаются отдельно, без конвертации. Суммы передаются строками с двумя знаками после запятой.")
     def summary(request: Request, month: str | None = Query(default=None, title="Месяц итогов", description="Месяц срока оплаты в формате YYYY-MM. Без параметра итоги включают все созданные периоды."), user=Depends(current)):
         cfg = request.app.state.settings
-        sums = {c: {"planned": 0, "paid": 0, "unpaid": 0, "overdue": 0} for c in CURRENCIES}
-        counts = {"total_count": 0, "paid_count": 0, "unpaid_count": 0, "overdue_count": 0}
         with connect(cfg) as db, transaction(db):
-            for row in occurrence_rows(db, cfg, user, month):
-                amounts = sums[row["currency"]]
-                value = row["amount_minor"]
-                amounts["planned"] += value
-                amounts["paid" if row["is_paid"] else "unpaid"] += value
-                counts["total_count"] += 1
-                counts["paid_count" if row["is_paid"] else "unpaid_count"] += 1
-                if not row["is_paid"] and row["due_date"] < cfg.today.isoformat():
-                    amounts["overdue"] += value
-                    counts["overdue_count"] += 1
-        return {"currencies": {c: {k: money(v) for k, v in a.items()} for c, a in sums.items()}, **counts}
+            refresh(db,cfg,month,user=user)
+            return queries.summary(db,cfg,user,month)
+
+    @app.get('/api/v1/users/page',tags=['Пользователи'],summary='Участники страницами и поиск ответственного')
+    def users_page(request:Request,search:str=Query(default='',max_length=100),limit:int=Query(default=30,ge=1,le=100),
+        offset:int=Query(default=0,ge=0,le=10000000),user=Depends(admin)):
+        with connect(request.app.state.settings) as db:
+            clause=' WHERE team_id=? AND (instr(CASEFOLD(full_name),CASEFOLD(?))>0 OR instr(CASEFOLD(username),CASEFOLD(?))>0)'
+            args=(user['team_id'],search.strip(),search.strip())
+            total=db.execute('SELECT COUNT(*) FROM users'+clause,args).fetchone()[0]
+            rows=db.execute('SELECT * FROM users'+clause+' ORDER BY env_managed DESC,id LIMIT ? OFFSET ?',(*args,limit,offset)).fetchall()
+            return {'items':[public_user(r)|{'env_managed':bool(r['env_managed'])} for r in rows],
+              'total':total,'limit':limit,'offset':offset,'has_more':offset+len(rows)<total}
 
     @app.get("/api/v1/users", tags=["Пользователи"], summary="Получить список пользователей", description="Только администратор. Возвращает логины, имена и роли. Конфигурационная учётная запись администратора помечена как управляемая через окружение.")
     def users(request: Request, user=Depends(admin)):
         with connect(request.app.state.settings) as db:
-            return [public_user(row) for row in db.execute("SELECT * FROM users WHERE team_id=? ORDER BY env_managed DESC,id", (user["team_id"],))]
+            return [public_user(row) for row in db.execute("SELECT * FROM users WHERE team_id=? ORDER BY env_managed DESC,id LIMIT 100", (user["team_id"],))]
+
+    @app.get('/api/v1/admins/page',tags=['Пользователи'],summary='Отдельные администраторы страницами')
+    def admins_page(request:Request,search:str=Query(default='',max_length=100),limit:int=Query(default=30,ge=1,le=100),
+        offset:int=Query(default=0,ge=0,le=10000000),user=Depends(admin)):
+        if not user['env_managed']:raise HTTPException(403,'Только конфигурационный администратор.')
+        with connect(request.app.state.settings) as db:
+            clause=" WHERE role='admin' AND (instr(CASEFOLD(full_name),CASEFOLD(?))>0 OR instr(CASEFOLD(username),CASEFOLD(?))>0)"
+            args=(search.strip(),search.strip())
+            total=db.execute('SELECT COUNT(*) FROM users'+clause,args).fetchone()[0]
+            rows=db.execute('SELECT * FROM users'+clause+' ORDER BY id LIMIT ? OFFSET ?',(*args,limit,offset)).fetchall()
+            return {'items':[public_user(r) for r in rows],'total':total,'limit':limit,'offset':offset,'has_more':offset+len(rows)<total}
 
     @app.get("/api/v1/admins", tags=["Пользователи"], summary="Получить список администраторов", description="Конфигурационный администратор видит только имена отдельных команд для управления доступом; платежи и группы других команд недоступны.")
     def admins(request: Request, user=Depends(admin)):
         if not user["env_managed"]:
             raise HTTPException(403, "Только конфигурационный администратор может управлять администраторами.")
         with connect(request.app.state.settings) as db:
-            return [public_user(row) for row in db.execute("SELECT * FROM users WHERE role='admin' ORDER BY id")]
+            return [public_user(row) for row in db.execute("SELECT * FROM users WHERE role='admin' ORDER BY id LIMIT 100")]
 
     @app.post("/api/v1/admins", status_code=201, tags=["Пользователи"], summary="Создать отдельного администратора", description="Конфигурационный администратор создаёт новую изолированную команду. Новый администратор подключает собственную Telegram-группу в настройках.")
     def admin_create(body: UserCreate, request: Request, user=Depends(admin)):
@@ -514,7 +561,43 @@ def create_app(settings: Settings | None = None):
         from .telegram_connections import is_connected
         with connect(cfg) as db:
             configured = is_connected(db, cfg, user["team_id"])
-        return {"timezone": cfg.timezone, "today": cfg.today.isoformat(), "telegram_configured": configured, "reminder_days": 3, "product_name": "Учёт регулярных платежей", "integration_mode": "manual"}
+            condition,values=owner_scope(user)
+            active_count=db.execute('SELECT COUNT(*) FROM recurring_payments r JOIN users owner ON owner.id=r.owner_id WHERE r.active=1'+condition,values).fetchone()[0]
+        return {"timezone": cfg.timezone, "today": cfg.today.isoformat(), "telegram_configured": configured, "reminder_days": 3, "product_name": "Учёт регулярных платежей", "integration_mode": "manual", "active_count":active_count}
+
+    @app.get('/api/v1/activity/page',tags=['Система'],summary='Журнал страницами с поиском')
+    def activity_page(request:Request,search:str=Query(default='',max_length=160),category:str='all',
+        limit:int=Query(default=30,ge=1,le=100),offset:int=Query(default=0,ge=0,le=10000000),user=Depends(admin)):
+        clauses,args=['team_id=?'],[user['team_id']]
+        actions={'payments':('payment_created','payment_updated','payment_archived','payment_paid','payment_unpaid'),
+          'users':('user_created','user_updated','user_deleted','invitation_created','invitation_accepted','invitation_revoked'),
+          'access':('login','logout','password_changed','telegram_login','telegram_identity_linked','telegram_identity_unlinked','telegram_connected','telegram_disconnected','telegram_link_requested')}
+        if category!='all':
+            if category not in actions:raise HTTPException(422,'Неизвестный тип действия.')
+            clauses.append('action IN ('+','.join('?' for _ in actions[category])+')');args.extend(actions[category])
+        if search.strip():
+            clauses.append('(instr(CASEFOLD(username),CASEFOLD(?))>0 OR instr(CASEFOLD(description),CASEFOLD(?))>0)');args.extend([search.strip()]*2)
+        clause=' WHERE '+' AND '.join(clauses) if clauses else ''
+        with connect(request.app.state.settings) as db:
+            total=db.execute('SELECT COUNT(*) FROM audit_events'+clause,args).fetchone()[0]
+            rows=db.execute('SELECT id,username,action,description,created_at FROM audit_events'+clause+' ORDER BY id DESC LIMIT ? OFFSET ?',(*args,limit,offset)).fetchall()
+        return {'items':[dict(r) for r in rows],'total':total,'limit':limit,'offset':offset,'has_more':offset+len(rows)<total}
+
+    @app.get('/api/v1/reminders/page',tags=['Система'],summary='Очередь страницами по состоянию и названию')
+    def reminders_page(request:Request,search:str=Query(default='',max_length=160),state:str='all',
+        limit:int=Query(default=30,ge=1,le=100),offset:int=Query(default=0,ge=0,le=10000000),user=Depends(admin)):
+        clauses,args=['owner.team_id=?'],[user['team_id']]
+        if state!='all':
+            if state not in {'pending','sending','retry','sent','cancelled','unknown'}:raise HTTPException(422,'Неизвестное состояние.')
+            clauses.append('b.state=?');args.append(state)
+        if search.strip():clauses.append('instr(CASEFOLD(o.name),CASEFOLD(?))>0');args.append(search.strip())
+        clause=' WHERE '+' AND '.join(clauses) if clauses else ''
+        source=' FROM reminder_outbox b JOIN payment_occurrences o ON o.id=b.occurrence_id JOIN recurring_payments r ON r.id=o.recurring_payment_id JOIN users owner ON owner.id=r.owner_id'
+        with connect(request.app.state.settings) as db:
+            total=db.execute('SELECT COUNT(*)'+source+clause,args).fetchone()[0]
+            rows=db.execute('''SELECT b.id,b.occurrence_id,b.state,b.attempts,b.next_attempt_at,b.sent_at,b.last_error,
+              b.recipient_chat_id,o.name,o.due_date'''+source+clause+' ORDER BY b.id DESC LIMIT ? OFFSET ?',(*args,limit,offset)).fetchall()
+        return {'items':[dict(r) for r in rows],'total':total,'limit':limit,'offset':offset,'has_more':offset+len(rows)<total}
 
     @app.get("/api/v1/activity", tags=["Система"], summary="Получить журнал действий", description="Только администратор. Возвращает последние события входа, изменения платежей и управления пользователями. Пароли и токены в журнале не сохраняются.")
     def activity(request: Request, limit: int = Query(default=30, ge=1, le=100, title="Количество событий", description="Сколько последних событий вернуть: от 1 до 100, по умолчанию 30."), user=Depends(admin)):
@@ -533,6 +616,8 @@ def create_app(settings: Settings | None = None):
     register_invitation_routes(app, current, admin)
     from .telegram_connections import register_routes
     register_routes(app, current, admin)
+    from .telegram_identity import register_routes as register_identity_routes
+    register_identity_routes(app,current,public_user,COOKIE)
 
     frontend_dist = ROOT / "frontend" / "dist"
     if (frontend_dist / "assets").exists():
@@ -563,13 +648,25 @@ def create_app(settings: Settings | None = None):
         schema.setdefault("components", {}).setdefault("securitySchemes", {}).update({
             "sessionCookie": {"type": "apiKey", "in": "cookie", "name": COOKIE, "description": "Защищённый сессионный cookie HttpOnly устанавливается при входе и отправляется браузером автоматически. Сначала войдите через веб-панель; вводить значение вручную не нужно."},
             "csrfHeader": {"type": "apiKey", "in": "header", "name": "X-CSRF-Token", "description": "Скопируйте csrf_token из ответа входа или GET /api/v1/auth/me. Токен обязателен для изменяющих запросов POST, PATCH и DELETE после входа."},
+            "telegramBrowser": {"type":"apiKey","in":"cookie","name":"ik_telegram_browser","description":"Одноразовый HttpOnly cookie исходного браузера. Выдаётся методом начала входа, не передаётся боту и действует пять минут."},
         })
         for path, methods in schema["paths"].items():
             for method, operation in methods.items():
                 if not isinstance(operation, dict) or "operationId" not in operation:
                     continue
-                if path in {"/api/v1/auth/login", "/api/v1/health", "/api/v1/invitations/inspect", "/api/v1/invitations/accept"}:
+                operation.setdefault('description',operation['summary']+'. Доступ к финансовым записям ограничен владельцем или администратором; ответы списков ограничены размером страницы.')
+                for parameter in operation.get('parameters',[]):
+                    labels={'month':'Месяц','currency':'Валюта','status':'Статус','search':'Поиск','day':'Дата','limit':'Размер страницы','offset':'Смещение','sort':'Сортировка','descending':'Обратный порядок','payment_id':'Идентификатор платежа','chat_id':'Идентификатор группы','id':'Идентификатор запроса','token':'Одноразовый токен','category':'Категория','state':'Состояние'}
+                    label=labels.get(parameter['name'],'Параметр запроса')
+                    parameter.setdefault('description',label+'. Учитываются права текущего пользователя.')
+                    if not re.search('[А-ЯЁа-яё]',parameter.get('schema',{}).get('title','')):
+                        parameter.setdefault('schema',{})['title']=label
+                if path in {'/api/v1/auth/telegram/status','/api/v1/auth/telegram/complete'}:
+                    operation['security']=[{'telegramBrowser':[]}]
+                    operation['description']+=' Требуется cookie исходного браузера; для режима привязки дополнительно нужны прежняя сессия и CSRF.'
+                elif path in {"/api/v1/auth/login", "/api/v1/health", "/api/v1/invitations/inspect", "/api/v1/invitations/accept",'/api/v1/auth/telegram/config','/api/v1/auth/telegram/start'} or (path=='/api/v1/auth/telegram/bot-link' and method=='get'):
                     operation["security"] = []
+                    if path=='/api/v1/auth/telegram/start':operation['description']+=' Режим login доступен до входа; режим link требует сессию и CSRF. Telegram не создаёт новые аккаунты.'
                 else:
                     operation["security"] = [{"sessionCookie": [], **({"csrfHeader": []} if method in {"post", "patch", "put", "delete"} else {})}]
                     operation.setdefault("responses", {})["401"] = {"description": "Сессия отсутствует, истекла или была завершена. Войдите снова."}
@@ -591,7 +688,9 @@ def create_app(settings: Settings | None = None):
             titles = {"HTTPValidationError": "Ошибка проверки запроса", "ValidationError": "Ошибка поля запроса",
                       "Detail": "Сведения об ошибках", "Location": "Расположение ошибки",
                       "Message": "Сообщение об ошибке", "Error Type": "Тип ошибки",
-                      "Context": "Дополнительные сведения", "Input": "Исходные данные"}
+                      "Context": "Дополнительные сведения", "Input": "Исходные данные",
+                      'ChallengeRequest':'Начало подтверждения Telegram','ChallengeId':'Подтверждение запроса Telegram',
+                      'BotLink':'Привязка из бота','Mode':'Режим','Id':'Идентификатор','Token':'Одноразовый токен'}
             if isinstance(node, dict):
                 if node.get("title") in titles:
                     node["title"] = titles[node["title"]]

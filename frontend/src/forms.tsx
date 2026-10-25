@@ -11,6 +11,8 @@ import {
   Trash2,
 } from "lucide-react";
 import { api, setCsrf } from "./api";
+import OwnerPicker from "./OwnerPicker";
+import { TelegramLogin } from "./TelegramAuth";
 import type { Occurrence, Recurring, Session, User } from "./api";
 import {
   currencies,
@@ -131,6 +133,7 @@ export function Login({
               )}
             </button>
           </form>
+          <TelegramLogin onSession={onLogin} />
           <div className="login-help">
             <CircleHelp size={17} />
             <p>Используйте учётную запись приложения.</p>
@@ -143,15 +146,13 @@ export function Login({
 export function AddPayment({
   today,
   initialName = "",
-  owners,
-  defaultOwnerId,
+  owner,
   onClose,
   onSuccess,
 }: {
   today: string;
   initialName?: string;
-  owners?: User[];
-  defaultOwnerId?: number;
+  owner?: User;
   onClose: () => void;
   onSuccess: () => void;
 }) {
@@ -171,7 +172,7 @@ export function AddPayment({
           currency: data.get("currency"),
           next_due_date: data.get("next_due_date"),
           frequency: "monthly",
-          ...(owners ? { owner_id: Number(data.get("owner_id")) } : {}),
+          ...(owner ? { owner_id: Number(data.get("owner_id")) } : {}),
         }),
       });
       onSuccess();
@@ -188,18 +189,7 @@ export function AddPayment({
       onClose={onClose}
     >
       <form onSubmit={submit}>
-        {owners && (
-          <label>
-            Ответственный
-            <select name="owner_id" defaultValue={defaultOwnerId} required>
-              {owners.map((owner) => (
-                <option key={owner.id} value={owner.id}>
-                  {owner.full_name || owner.username}
-                </option>
-              ))}
-            </select>
-          </label>
-        )}
+        {owner && <OwnerPicker initial={owner} />}
         <label>
           Название платежа
           <input
@@ -582,8 +572,18 @@ export function UserModal({
   }
   return (
     <Modal
-      title={newAdmin ? "Создать администратора" : isNew ? "Создать аккаунт" : "Изменить пользователя"}
-      subtitle={newAdmin ? "Отдельная команда со своей группой Telegram. Передайте пароль администратору безопасным способом." : "Учётная запись участника команды."}
+      title={
+        newAdmin
+          ? "Создать администратора"
+          : isNew
+            ? "Создать аккаунт"
+            : "Изменить пользователя"
+      }
+      subtitle={
+        newAdmin
+          ? "Отдельная команда со своей группой Telegram. Передайте пароль администратору безопасным способом."
+          : "Учётная запись участника команды."
+      }
       onClose={onClose}
     >
       <form onSubmit={submit}>

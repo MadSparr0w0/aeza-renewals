@@ -80,6 +80,7 @@ def next_user_id(db):
 def connect(settings):
     connection = sqlite3.connect(settings.database_path, timeout=15, isolation_level=None)
     connection.row_factory = sqlite3.Row
+    connection.create_function('CASEFOLD', 1, lambda value: str(value or '').casefold(), deterministic=True)
     connection.execute("PRAGMA foreign_keys=ON")
     connection.execute("PRAGMA busy_timeout=15000")
     try:
@@ -145,6 +146,11 @@ def initialize(settings):
               BEGIN SELECT RAISE(ABORT,'owner_id is required'); END""")
             from .telegram_connections import initialize_telegram
             initialize_telegram(db, settings)
+            from .telegram_identity import initialize_identity
+            initialize_identity(db)
+            db.execute('CREATE INDEX IF NOT EXISTS ix_recurring_materialize ON recurring_payments(active,next_materialize_date)')
+            db.execute('CREATE INDEX IF NOT EXISTS ix_occurrences_due_id ON payment_occurrences(due_date,id)')
+            db.execute('CREATE INDEX IF NOT EXISTS ix_occurrences_paid_due ON payment_occurrences(is_paid,due_date,id)')
 
 
 def audit(db, user, action, description):

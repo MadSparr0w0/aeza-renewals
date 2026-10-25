@@ -104,9 +104,12 @@ def deny_financial_reads(db):
 
 
 @pytest.mark.parametrize("text", ["/menu", "/summary", "/payments", "/upcoming", "/overdue", "/paid 1", "/create rent"])
-def test_financial_commands_are_ignored_without_financial_reads(settings, db, text):
+def test_groups_ignore_financial_commands_and_unlinked_private_never_reads_finances(settings, db, text):
     deny_financial_reads(db)
-    assert bot.handle_update(settings, db, command(text=text)) is None
+    private=bot.handle_update(settings, db, command(text=text))
+    if text in {'/menu','/summary','/payments'}:
+        assert private.method=='sendMessage' and 'привязки' in private.payload['text']
+    else:assert private is None
     assert bot.handle_update(settings, db, command(text=text, chat_id=-1001234567890, chat_type="supergroup")) is None
 
 
@@ -115,15 +118,15 @@ def test_private_help_is_public_static_and_never_reads_finances(settings, db, te
     deny_financial_reads(db)
     action = bot.handle_update(settings, db, command(text=text))
     assert action.method == "sendMessage"
-    assert "корпоративную группу" in action.payload["text"]
+    assert "привязки" in action.payload["text"]
     assert len(action.payload["text"]) < 1000
-    assert "parse_mode" not in action.payload
+    assert action.payload['parse_mode']=='HTML'
 
 
 def test_private_help_links_only_valid_public_https_panel(settings, db):
     configured = replace(settings, origin="https://example.com")
     action = bot.handle_update(configured, db, command())
-    assert action.payload["reply_markup"]["inline_keyboard"][0][0]["url"] == configured.origin
+    assert action.payload["reply_markup"]["inline_keyboard"][0][0]["url"].startswith(configured.origin+'/#telegram=')
     assert "reply_markup" not in bot.handle_update(settings, db, command()).payload
 
 
@@ -144,7 +147,7 @@ def test_old_callbacks_return_only_static_notice_no_financial_queries(settings, 
     deny_financial_reads(db)
     action = bot.handle_update(settings, db, callback(data="ik:summary:2026-10:0"))
     assert action.method == "answerCallbackQuery"
-    assert action.payload == {"callback_query_id": "callback-test", "text": "Работа с платежами доступна в веб-панели."}
+    assert action.payload == {"callback_query_id": "callback-test", "text": "Кнопка устарела. Откройте /menu."}
     inline = {"callback_query": {"id": "inline", "inline_message_id": "missing-chat", "data": "ik:summary:2026-10:0"}}
     assert bot.handle_update(settings, db, inline) is None
 
@@ -211,7 +214,7 @@ def test_callbacks_answer_once_and_never_edit_or_send_financial_data(settings, d
 def test_ignored_financial_commands_still_advance_durable_offset(settings, db):
     scope, owner = owned(db, settings)
     client = FakeClient()
-    assert bot.process_update(settings, db, client, scope, owner, command(update_id=9, text="/summary"), now=1000) == "ignored"
+    assert bot.process_update(settings, db, client, scope, owner, command(update_id=9, text="/summary",chat_id=-1001234567890,chat_type='supergroup'), now=1000) == "ignored"
     assert not client.calls
     assert db.execute("SELECT next_offset FROM telegram_pollers WHERE scope=?", (scope,)).fetchone()[0] == 10
 
@@ -414,7 +417,7 @@ def test_client_method_allowlist_prevents_old_financial_edit_and_webhook_mutatio
     calls = []
     with httpx.Client(transport=httpx.MockTransport(lambda request: calls.append(request) or httpx.Response(200, json={"ok": True, "result": True}))) as http:
         client = bot.TelegramClient(settings.telegram_bot_token, http)
-        for method in ("editMessageText", "deleteWebhook", "deleteMessage"):
+        for method in ("deleteWebhook", "deleteMessage"):
             with pytest.raises(bot.TelegramError, match="method_not_allowed"):
                 client.call(method)
     assert not calls

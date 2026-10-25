@@ -1,0 +1,153 @@
+.telegram-auth__login {
+  margin-top: 22px;
+}
+.telegram-auth__identity-panel {
+  margin-top: 24px;
+}
+.telegram-auth__divider {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 20px;
+  color: var(--muted);
+  font: 12px/1.5 var(--font-ui);
+}
+.telegram-auth__divider::before,
+.telegram-auth__divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+.telegram-auth__login-button {
+  width: 100%;
+}
+.telegram-auth__load-error {
+  color: var(--muted);
+  font: 12px/1.7 var(--font-ui);
+}
+.telegram-auth__load-error p {
+  margin-bottom: 8px;
+}
+.telegram-auth__progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  color: var(--muted);
+  font: 13px/1.7 var(--font-ui);
+}
+.telegram-auth__progress > svg {
+  flex-shrink: 0;
+}
+.telegram-auth__steps {
+  display: grid;
+  gap: 13px;
+  margin: 0 0 24px;
+  padding-left: 21px;
+  color: #dedede;
+  font: 13px/1.8 var(--font-ui);
+}
+.telegram-auth__steps li {
+  padding-left: 4px;
+}
+.telegram-auth__steps li::marker {
+  color: var(--muted);
+}
+.telegram-auth__open-bot {
+  width: 100%;
+}
+.telegram-auth__flow p.telegram-auth__hint,
+.telegram-auth__bot-confirm p.telegram-auth__hint,
+.telegram-auth__identity-panel p.telegram-auth__hint {
+  margin: 16px 0;
+  color: var(--muted);
+  font: 12px/1.8 var(--font-ui);
+}
+.telegram-auth__notice {
+  margin: 18px 0 0;
+  padding: 14px 16px;
+  border: 1px solid #494949;
+  border-radius: 9px;
+  background: #252525;
+  color: #e4e4e4;
+  font: 13px/1.7 var(--font-ui);
+}
+.telegram-auth__linked-account,
+.telegram-auth__accounts {
+  display: grid;
+  gap: 9px;
+  margin: 20px 0;
+  padding: 18px;
+  border: 1px solid #494949;
+  border-radius: 9px;
+  background: #252525;
+}
+.telegram-auth__linked-account > span,
+.telegram-auth__accounts dt {
+  color: var(--muted);
+  font: 12px/1.6 var(--font-ui);
+}
+.telegram-auth__linked-account > strong,
+.telegram-auth__accounts dd {
+  margin: 0;
+  color: var(--text);
+  font-size: 17px;
+  font-weight: 550;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.telegram-auth__accounts {
+  gap: 20px;
+}
+.telegram-auth__accounts > div {
+  display: grid;
+  gap: 7px;
+}
+.telegram-auth__disconnect {
+  display: grid;
+  gap: 15px;
+  padding: 18px;
+  margin-top: 18px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #191919;
+}
+.telegram-auth__disconnect p {
+  margin: 0;
+  color: #d5d5d5;
+  font: 13px/1.8 var(--font-ui);
+}
+.telegram-auth__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+  margin-top: 20px;
+}
+.telegram-auth__disconnect .telegram-auth__actions {
+  margin-top: 0;
+}
+.telegram-auth__identity-panel .form-error {
+  margin-top: 18px;
+}
+.telegram-auth__identity-panel > .telegram-auth__notice {
+  margin-bottom: 0;
+  color: #e4e4e4;
+  font: 13px/1.7 var(--font-ui);
+}
+@media (max-width: 600px) {
+  .telegram-auth__flow .modal-actions,
+  .telegram-auth__bot-confirm .modal-actions {
+    flex-wrap: wrap;
+  }
+  .telegram-auth__identity-panel .button.small,
+  .telegram-auth__identity-panel .text-button {
+    min-height: 44px;
+  }
+  .telegram-auth__linked-account,
+  .telegram-auth__accounts,
+  .telegram-auth__disconnect {
+    padding: 16px;
+  }
+}
