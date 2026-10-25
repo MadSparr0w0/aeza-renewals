@@ -1,5 +1,5 @@
 [Unit]
-Description=Aeza renewals HTTP API
+Description=Aeza regular payments HTTP API
 Wants=network-online.target
 After=network-online.target
 StartLimitIntervalSec=300

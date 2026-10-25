@@ -1,5 +1,5 @@
 [Unit]
-Description=Aeza renewal reminder worker
+Description=Aeza regular payment reminder worker
 Wants=network-online.target
 After=network-online.target aeza-renewals-api.service
 StartLimitIntervalSec=300

@@ -1,5 +1,5 @@
 [Unit]
-Description=Aeza renewal Telegram menu poller
+Description=Aeza corporate group connection poller
 Wants=network-online.target
 After=network-online.target aeza-renewals-api.service
 StartLimitIntervalSec=300

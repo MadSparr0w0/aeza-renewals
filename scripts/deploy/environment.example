@@ -11,7 +11,7 @@ ADMIN_PASSWORD_HASH=''
 APP_SECRET=''
 
 # Replace with the exact HTTPS origin configured at the reverse proxy, no path.
-APP_ORIGIN=https://renewals.example.com
+APP_ORIGIN=https://payments.example.com
 APP_ALLOWED_ORIGINS=
 COOKIE_SECURE=true
 SESSION_HOURS=12
@@ -19,8 +19,10 @@ TIMEZONE=Europe/Moscow
 # Required absolute path: the source tree is read-only to the service user.
 DATABASE_PATH=/var/lib/aeza-renewals/invoice_keeper.db
 
-# Both values are needed for delivery. Telegram polling also needs a numeric ID.
+# Token stays server-side. Delivery also requires a group confirmed in the web UI.
 TELEGRAM_BOT_TOKEN=''
-TELEGRAM_CHAT_ID=''
+TELEGRAM_BOT_USERNAME=aezainkeep_bot
+# Do not configure a legacy personal chat as a recipient.
+# Corporate group binding is stored in SQLite after connect + web confirmation.
 # Optional, explicit password for seed only; no demo password is supplied by default.
 DEMO_USER_PASSWORD=''
