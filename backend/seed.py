@@ -22,7 +22,7 @@ def seed(settings):
         if demo_password and not db.execute("SELECT 1 FROM users WHERE username='demo'").fetchone():
             if not 12 <= len(demo_password) <= 256:
                 raise RuntimeError("DEMO_USER_PASSWORD: требуется 12–256 символов. Данные не изменены.")
-            db.execute("INSERT INTO users(id,username,full_name,password_hash,role,created_at) VALUES(?,'demo','Алексей Смирнов',?,'user',?)", (next_user_id(db), hash_password(demo_password), utcnow()))
+            db.execute("INSERT INTO users(id,username,full_name,password_hash,role,created_at,team_id) VALUES(?,'demo','Алексей Смирнов',?,'user',?,?)", (next_user_id(db), hash_password(demo_password), utcnow(), admin["id"]))
         demo = db.execute("SELECT * FROM users WHERE username='demo'").fetchone()
         participant_id = demo["id"] if demo else admin["id"]
         if not db.execute("SELECT 1 FROM recurring_payments LIMIT 1").fetchone():

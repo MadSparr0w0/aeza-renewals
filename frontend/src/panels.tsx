@@ -347,6 +347,7 @@ export function Calendar({
 }
 export function Team({
   users,
+  admins,
   session,
   onEdit,
   onDelete,
@@ -354,6 +355,7 @@ export function Team({
   onRevokeInvitation,
 }: {
   users: User[];
+  admins?: User[];
   session: Session;
   onEdit: (u: User) => void;
   onDelete: (u: User) => void;
@@ -397,7 +399,7 @@ export function Team({
                 </span>
               </td>
               <td>
-                <span className="access-label">Все платежи и участники</span>
+                <span className="access-label">Платежи и участники своей команды</span>
               </td>
               <td>
                 <LockKeyhole size={15} className="muted" />
@@ -447,6 +449,26 @@ export function Team({
           </tbody>
         </table>
       </div>
+      {admins && (
+        <div className="invitations-section">
+          <h2>Отдельные администраторы <span>{admins.length - 1}</span></h2>
+          <p>Каждый видит только свою команду и подключает свою группу Telegram.</p>
+          <div className="table-scroll">
+            <table className="invitations-table">
+              <thead><tr><th>Имя</th><th>Логин</th><th>Команда</th></tr></thead>
+              <tbody>
+                {admins.filter((item) => item.id !== session.user.id).map((item) => (
+                  <tr key={item.id}>
+                    <td><strong>{item.full_name}</strong></td>
+                    <td>{item.username}</td>
+                    <td>Отдельная</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
       <div className="invitations-section">
         <h2>
           Приглашения <span>{invitations.length}</span>

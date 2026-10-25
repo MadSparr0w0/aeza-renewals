@@ -62,8 +62,8 @@ def register_routes(app, current, admin):
                 raise HTTPException(409, "Пользователь с таким логином уже существует.")
             if db.execute("SELECT 1 FROM invitations WHERE username=? AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at>?", (body.username, now)).fetchone():
                 raise HTTPException(409, "Для этого логина уже есть действующее приглашение.")
-            identifier = db.execute("""INSERT INTO invitations(username,full_name,token_hash,expires_at,created_at,created_by)
-              VALUES(?,?,?,?,?,?)""", (body.username, body.full_name, digest(cfg.app_secret, "invitation:" + token), now + TTL_SECONDS, utcnow(), user["id"])).lastrowid
+            identifier = db.execute("""INSERT INTO invitations(username,full_name,token_hash,expires_at,created_at,created_by,team_id)
+              VALUES(?,?,?,?,?,?,?)""", (body.username, body.full_name, digest(cfg.app_secret, "invitation:" + token), now + TTL_SECONDS, utcnow(), user["id"], user["team_id"])).lastrowid
             row = db.execute("SELECT * FROM invitations WHERE id=?", (identifier,)).fetchone()
             audit(db, user, "invitation_created", "Создано приглашение: " + body.username)
             return public_invitation(row, now) | {"invitation_url": cfg.origin + "/#invite=" + token}
@@ -71,12 +71,12 @@ def register_routes(app, current, admin):
     @app.get("/api/v1/invitations", tags=["Пользователи"], summary="Получить приглашения", description="Только администратор. Последние 100 приглашений со статусами active, accepted, revoked или expired. Секретные ссылки и хеши не возвращаются.")
     def listing(request: Request, user=Depends(admin)):
         with connect(request.app.state.settings) as db:
-            return [public_invitation(row, int(time.time())) for row in db.execute("SELECT * FROM invitations ORDER BY id DESC LIMIT 100")]
+            return [public_invitation(row, int(time.time())) for row in db.execute("SELECT * FROM invitations WHERE team_id=? ORDER BY id DESC LIMIT 100", (user["team_id"],))]
 
     @app.delete("/api/v1/invitations/{invitation_id}", status_code=204, tags=["Пользователи"], summary="Отозвать приглашение", description="Только администратор. Запрещает использование ещё не принятой ссылки. Уже созданный по приглашению пользователь этим действием не удаляется.")
     def revoke(invitation_id: Annotated[int, ApiPath(title="Идентификатор приглашения", description="Числовой идентификатор приглашения из списка администратора.")], request: Request, user=Depends(admin)):
         with connect(request.app.state.settings) as db, transaction(db):
-            row = db.execute("SELECT * FROM invitations WHERE id=?", (invitation_id,)).fetchone()
+            row = db.execute("SELECT * FROM invitations WHERE id=? AND team_id=?", (invitation_id, user["team_id"])).fetchone()
             if not row:
                 raise HTTPException(404, "Приглашение не найдено.")
             if row["accepted_at"] is not None:
@@ -109,8 +109,8 @@ def register_routes(app, current, admin):
                 invitation = active_invitation(db, token_hash, now)
                 if db.execute("SELECT 1 FROM users WHERE username=?", (invitation["username"],)).fetchone():
                     raise HTTPException(409, "Логин приглашения уже занят. Обратитесь к администратору.")
-                identifier = db.execute("""INSERT INTO users(id,username,full_name,password_hash,role,created_at)
-                  VALUES(?,?,?,?,'user',?)""", (next_user_id(db), invitation["username"], invitation["full_name"], encoded, utcnow())).lastrowid
+                identifier = db.execute("""INSERT INTO users(id,username,full_name,password_hash,role,created_at,team_id)
+                  VALUES(?,?,?,?,'user',?,?)""", (next_user_id(db), invitation["username"], invitation["full_name"], encoded, utcnow(), invitation["team_id"])).lastrowid
                 db.execute("UPDATE invitations SET accepted_at=?,accepted_user_id=? WHERE id=?", (now, identifier, invitation["id"]))
                 old_token = request.cookies.get(COOKIE, "")
                 if old_token:

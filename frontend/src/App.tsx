@@ -149,6 +149,7 @@ export default function App() {
   const [recurring, setRecurring] = useState<Recurring[]>([]);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [users, setUsers] = useState<User[]>([]);
+  const [admins, setAdmins] = useState<User[]>([]);
   const [month, setMonth] = useState(savedNavigation.month);
   const [currency, setCurrency] = useState<Currency>("RUB");
   const [loading, setLoading] = useState(false);
@@ -160,6 +161,7 @@ export default function App() {
   const [deletePayment, setDeletePayment] = useState<Occurrence | null>(null);
   const [editSeries, setEditSeries] = useState<Recurring | null>(null);
   const [userModal, setUserModal] = useState<User | "new" | null>(null);
+  const [adminModalOpen, setAdminModalOpen] = useState(false);
   const [deleteUser, setDeleteUser] = useState<User | null>(null);
   const [invitations, setInvitations] = useState<Invitation[]>([]);
   const [invitationOpen, setInvitationOpen] = useState(false);
@@ -179,6 +181,7 @@ export default function App() {
     setOccurrences([]);
     setRecurring([]);
     setUsers([]);
+    setAdmins([]);
     setInvitations([]);
     setSettings(null);
     setSummary(null);
@@ -189,6 +192,7 @@ export default function App() {
     setDeletePayment(null);
     setEditSeries(null);
     setUserModal(null);
+    setAdminModalOpen(false);
     setDeleteUser(null);
     setInvitationOpen(false);
     setRevokeInvitation(null);
@@ -370,6 +374,14 @@ export default function App() {
       mounted = false;
     };
   }, [isAdmin, revision]);
+  useEffect(() => {
+    if (!session?.user.env_managed || view !== "team") return;
+    let mounted = true;
+    api<User[]>("/admins")
+      .then((result) => { if (mounted) setAdmins(result); })
+      .catch((reason) => { if (mounted) setError((reason as Error).message); });
+    return () => { mounted = false; };
+  }, [session?.user.env_managed, view, revision]);
   useEffect(() => {
     if (!isAdmin || view !== "team") return;
     let mounted = true;
@@ -632,6 +644,11 @@ export default function App() {
             )}
             {isAdmin && view === "team" && (
               <div className="page-heading-actions">
+                {session.user.env_managed && (
+                  <button className="button secondary" onClick={() => setAdminModalOpen(true)}>
+                    <Plus size={17} /> Создать администратора
+                  </button>
+                )}
                 <button
                   className="button secondary"
                   onClick={() => setUserModal("new")}
@@ -805,6 +822,7 @@ export default function App() {
               onEdit={setUserModal}
               onDelete={setDeleteUser}
               invitations={invitations}
+              admins={session.user.env_managed ? admins : undefined}
               onRevokeInvitation={setRevokeInvitation}
             />
           )}
@@ -814,7 +832,7 @@ export default function App() {
               activeCount={recurring.filter((p) => p.active !== false).length}
               onActivity={isAdmin ? () => changeView("activity") : undefined}
               onChangePassword={
-                !isAdmin ? () => setPasswordOpen(true) : undefined
+                !session.user.env_managed ? () => setPasswordOpen(true) : undefined
               }
               canConfigureTelegram={!!isAdmin}
               onTelegramChanged={() => setRevision((value) => value + 1)}
@@ -907,6 +925,17 @@ export default function App() {
                 ? "Пользователь добавлен."
                 : "Данные пользователя сохранены.",
             );
+          }}
+        />
+      )}
+      {adminModalOpen && (
+        <UserModal
+          user="new"
+          newAdmin
+          onClose={() => setAdminModalOpen(false)}
+          onSuccess={() => {
+            setAdminModalOpen(false);
+            refresh("Отдельный администратор создан.");
           }}
         />
       )}

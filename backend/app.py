@@ -60,7 +60,7 @@ def validation_message(error):
 
 
 def public_user(row):
-    return {key: row[key] for key in ("id", "username", "full_name", "role")}
+    return {key: row[key] for key in ("id", "username", "full_name", "role")} | {"env_managed": bool(row["env_managed"])}
 
 
 def create_app(settings: Settings | None = None):
@@ -73,13 +73,13 @@ def create_app(settings: Settings | None = None):
             schedule_reminders(db, app.state.settings.today)
         yield
 
-    app = FastAPI(title="API регулярных платежей", version="1.1.0", description="Учёт ежемесячных расходов команды: коммунальные услуги, аренда, подписки и другие платежи. Участник видит и меняет свои записи; администратор управляет всеми платежами и участниками. Оплата отмечается вручную и не проводит банковскую операцию. Telegram отправляет уведомления только в подтверждённую общую группу, где участники видят владельца, название, сумму, валюту и срок. Сначала войдите в веб-панель и откройте документацию в том же браузере: сессионный cookie HttpOnly передаётся автоматически. Для изменяющих запросов скопируйте csrf_token из GET /api/v1/auth/me в csrfHeader окна «Авторизация». Сессионный cookie вручную вводить не нужно.", docs_url=None, openapi_url="/api/v1/openapi.json", redoc_url=None, lifespan=lifespan,
+    app = FastAPI(title="API регулярных платежей", version="1.2.0", description="Учёт ежемесячных расходов нескольких изолированных команд: коммунальные услуги, аренда, подписки и другие платежи. Участник видит и меняет свои записи; администратор управляет платежами и участниками своей команды. Оплата отмечается вручную и не проводит банковскую операцию. Telegram отправляет уведомления только в подтверждённую группу команды владельца, где участники видят владельца, название, сумму, валюту и срок. Сначала войдите в веб-панель и откройте документацию в том же браузере: сессионный cookie HttpOnly передаётся автоматически. Для изменяющих запросов скопируйте csrf_token из GET /api/v1/auth/me в csrfHeader окна «Авторизация». Сессионный cookie вручную вводить не нужно.", docs_url=None, openapi_url="/api/v1/openapi.json", redoc_url=None, lifespan=lifespan,
                   openapi_tags=[{"name": "Система", "description": "Состояние приложения, общие настройки и журнал действий."},
                                 {"name": "Авторизация", "description": "Вход, проверка текущей учётной записи и завершение сессии."},
                                 {"name": "Регулярные платежи", "description": "Ежемесячные расходы с владельцем и сохранением истории."},
                                 {"name": "Периоды оплаты", "description": "Сроки, ручные отметки, фактические даты оплаты и просрочка отдельных периодов."},
                                 {"name": "Итоги", "description": "Плановые, оплаченные, неоплаченные и просроченные суммы отдельно по валютам."},
-                                {"name": "Пользователи", "description": "Управление обычными пользователями. Доступно только администратору."}])
+                                {"name": "Пользователи", "description": "Управление участниками своей команды; конфигурационный администратор создаёт отдельные команды."}])
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request, exc):
@@ -148,7 +148,8 @@ def create_app(settings: Settings | None = None):
         return user
 
     def owner_scope(user, alias="r"):
-        return ("", ()) if user["role"] == "admin" else (" AND " + alias + ".owner_id=?", (user["id"],))
+        return ((" AND owner.team_id=?", (user["team_id"],)) if user["role"] == "admin"
+                else (" AND " + alias + ".owner_id=?", (user["id"],)))
 
     def recurring_row(db, payment_id, user):
         condition, values = owner_scope(user)
@@ -249,7 +250,7 @@ def create_app(settings: Settings | None = None):
     @app.post("/api/v1/auth/password", status_code=204, tags=["Авторизация"], summary="Сменить свой пароль", description="Обычный участник указывает текущий и новый пароль. После успешной смены все его сессии отзываются и нужен повторный вход. Конфигурационный администратор управляется только окружением.")
     def password_change(body: PasswordChange, request: Request, response: Response, user=Depends(current)):
         cfg = request.app.state.settings
-        if user["env_managed"] or user["role"] == "admin":
+        if user["env_managed"]:
             raise HTTPException(403, "Пароль администратора управляется только через окружение.")
         now = int(time.time())
         key = digest(cfg.app_secret, "password-change:" + str(user["id"]))
@@ -272,7 +273,7 @@ def create_app(settings: Settings | None = None):
             audit(db, user, "password_changed", "Участник изменил собственный пароль")
         response.delete_cookie(COOKIE, path="/", httponly=True, secure=cfg.cookie_secure, samesite="strict")
 
-    @app.get("/api/v1/recurring-payments", tags=["Регулярные платежи"], summary="Получить регулярные платежи", description="Участник получает только собственные серии, администратор — все. По умолчанию показаны действующие серии; прекращённые можно включить отдельным параметром. Ответ содержит owner_id, owner_name и can_manage.")
+    @app.get("/api/v1/recurring-payments", tags=["Регулярные платежи"], summary="Получить регулярные платежи", description="Участник получает только собственные серии, администратор — серии своей команды. По умолчанию показаны действующие серии; прекращённые можно включить отдельным параметром. Ответ содержит owner_id, owner_name и can_manage.")
     def recurring_list(request: Request, include_inactive: bool = Query(default=False, title="Включить прекращённые платежи", description="true — добавить прекращённые регулярные платежи; false — показать только действующие."), user=Depends(current)):
         cfg = request.app.state.settings
         with connect(cfg) as db, transaction(db):
@@ -290,7 +291,7 @@ def create_app(settings: Settings | None = None):
         if user["role"] != "admin" and owner_id != user["id"]:
             raise HTTPException(403, "Создавать платёж для другого участника может только администратор.")
         with connect(cfg) as db, transaction(db):
-            if not db.execute("SELECT 1 FROM users WHERE id=?", (owner_id,)).fetchone():
+            if not db.execute("SELECT 1 FROM users WHERE id=? AND team_id=?", (owner_id, user["team_id"])).fetchone():
                 raise HTTPException(422, "Указанный владелец платежа не найден.")
             recurring_id = add_recurring(db, name=body.name, amount=body.amount, currency=body.currency, next_due_date=body.next_due_date, created_by=user["id"], owner_id=owner_id)
             refresh(db, cfg, user=user)
@@ -339,7 +340,10 @@ def create_app(settings: Settings | None = None):
     def occurrence_rows(db, cfg, user, month=None, currency=None, status=None, search=None):
         refresh(db, cfg, month, user=user)
         conditions, args = [], []
-        if user["role"] != "admin":
+        if user["role"] == "admin":
+            conditions.append("owner.team_id=?")
+            args.append(user["team_id"])
+        else:
             conditions.append("r.owner_id=?")
             args.append(user["id"])
         if month:
@@ -366,7 +370,7 @@ def create_app(settings: Settings | None = None):
         query = OCCURRENCES + (" WHERE " + " AND ".join(conditions) if conditions else "") + " ORDER BY o.due_date,o.id"
         return db.execute(query, args).fetchall()
 
-    @app.get("/api/v1/payment-occurrences", tags=["Периоды оплаты"], summary="Получить периоды оплаты", description="Участник получает только периоды своих серий, администратор — все. Ответ содержит владельца, сумму, валюту, срок, отметку, дату и календарную просрочку. История сохраняется независимо от следующего периода.")
+    @app.get("/api/v1/payment-occurrences", tags=["Периоды оплаты"], summary="Получить периоды оплаты", description="Участник получает только периоды своих серий, администратор — периоды своей команды. Ответ содержит владельца, сумму, валюту, срок, отметку, дату и календарную просрочку. История сохраняется независимо от следующего периода.")
     def occurrences(request: Request, month: str | None = Query(default=None, title="Месяц", description="Фильтр по месяцу срока оплаты в формате YYYY-MM. Без параметра возвращаются все созданные периоды."), currency: str | None = Query(default=None, title="Валюта", description="Фильтр по валюте: RUB — рубли, USD — доллары, EUR — евро."), status: str | None = Query(default=None, title="Статус оплаты", description="paid — оплачено, unpaid — не оплачено, overdue — просрочено, pending — срок ещё не прошёл, all — все статусы."), search: str | None = Query(default=None, max_length=160, title="Поиск по названию", description="Текст для поиска внутри названия платежа."), user=Depends(current)):
         cfg = request.app.state.settings
         with connect(cfg) as db, transaction(db):
@@ -429,7 +433,31 @@ def create_app(settings: Settings | None = None):
     @app.get("/api/v1/users", tags=["Пользователи"], summary="Получить список пользователей", description="Только администратор. Возвращает логины, имена и роли. Конфигурационная учётная запись администратора помечена как управляемая через окружение.")
     def users(request: Request, user=Depends(admin)):
         with connect(request.app.state.settings) as db:
-            return [public_user(row) | {"env_managed": bool(row["env_managed"])} for row in db.execute("SELECT * FROM users ORDER BY env_managed DESC,id")]
+            return [public_user(row) for row in db.execute("SELECT * FROM users WHERE team_id=? ORDER BY env_managed DESC,id", (user["team_id"],))]
+
+    @app.get("/api/v1/admins", tags=["Пользователи"], summary="Получить список администраторов", description="Конфигурационный администратор видит только имена отдельных команд для управления доступом; платежи и группы других команд недоступны.")
+    def admins(request: Request, user=Depends(admin)):
+        if not user["env_managed"]:
+            raise HTTPException(403, "Только конфигурационный администратор может управлять администраторами.")
+        with connect(request.app.state.settings) as db:
+            return [public_user(row) for row in db.execute("SELECT * FROM users WHERE role='admin' ORDER BY id")]
+
+    @app.post("/api/v1/admins", status_code=201, tags=["Пользователи"], summary="Создать отдельного администратора", description="Конфигурационный администратор создаёт новую изолированную команду. Новый администратор подключает собственную Telegram-группу в настройках.")
+    def admin_create(body: UserCreate, request: Request, user=Depends(admin)):
+        if not user["env_managed"]:
+            raise HTTPException(403, "Только конфигурационный администратор может создавать администраторов.")
+        encoded = hash_password(body.password)
+        try:
+            with connect(request.app.state.settings) as db, transaction(db):
+                if db.execute("SELECT 1 FROM invitations WHERE username=? AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at>?", (body.username, int(time.time()))).fetchone():
+                    raise HTTPException(409, "Этот логин зарезервирован действующим приглашением.")
+                identifier = next_user_id(db)
+                db.execute("INSERT INTO users(id,username,full_name,password_hash,role,created_at,team_id) VALUES(?,?,?,?,'admin',?,?)",
+                           (identifier, body.username, body.full_name, encoded, utcnow(), identifier))
+                audit(db, user, "admin_created", "Создана отдельная команда: " + body.username)
+                return public_user(db.execute("SELECT * FROM users WHERE id=?", (identifier,)).fetchone())
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, "Администратор с таким логином уже существует.") from None
 
     @app.post("/api/v1/users", status_code=201, tags=["Пользователи"], summary="Создать участника с паролем", description="Только администратор. Создаёт участника, который видит и управляет своими платежами. Альтернатива — одноразовое приглашение, где пароль задаёт сам участник. Создание администратора через этот метод запрещено.")
     def user_create(body: UserCreate, request: Request, user=Depends(admin)):
@@ -438,7 +466,7 @@ def create_app(settings: Settings | None = None):
             with connect(request.app.state.settings) as db, transaction(db):
                 if db.execute("SELECT 1 FROM invitations WHERE username=? AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at>?", (body.username, int(time.time()))).fetchone():
                     raise HTTPException(409, "Этот логин зарезервирован действующим приглашением.")
-                result = db.execute("INSERT INTO users(id,username,full_name,password_hash,role,created_at) VALUES(?,?,?,?,'user',?)", (next_user_id(db), body.username, body.full_name, encoded, utcnow()))
+                result = db.execute("INSERT INTO users(id,username,full_name,password_hash,role,created_at,team_id) VALUES(?,?,?,?,'user',?,?)", (next_user_id(db), body.username, body.full_name, encoded, utcnow(), user["team_id"]))
                 row = db.execute("SELECT * FROM users WHERE id=?", (result.lastrowid,)).fetchone()
                 audit(db, user, "user_created", "Создан пользователь: " + body.username)
                 return public_user(row)
@@ -452,7 +480,7 @@ def create_app(settings: Settings | None = None):
         encoded = hash_password(body.password) if body.password else None
         try:
             with connect(request.app.state.settings) as db, transaction(db):
-                row = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+                row = db.execute("SELECT * FROM users WHERE id=? AND team_id=?", (user_id, user["team_id"])).fetchone()
                 if not row:
                     raise HTTPException(404, "Пользователь не найден.")
                 if row["env_managed"] or row["role"] == "admin":
@@ -469,12 +497,12 @@ def create_app(settings: Settings | None = None):
     @app.delete("/api/v1/users/{user_id}", status_code=204, tags=["Пользователи"], summary="Удалить участника", description="Только администратор. Передаёт все платежи участника администратору и удаляет учётную запись с её сессиями. Автор created_by, суммы, сроки и история сохраняются. Удалить администратора этим методом нельзя.")
     def user_delete(user_id: Annotated[int, ApiPath(title="Идентификатор пользователя", description="Числовой идентификатор удаляемого обычного пользователя.")], request: Request, user=Depends(admin)):
         with connect(request.app.state.settings) as db, transaction(db):
-            row = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+            row = db.execute("SELECT * FROM users WHERE id=? AND team_id=?", (user_id, user["team_id"])).fetchone()
             if not row:
                 raise HTTPException(404, "Пользователь не найден.")
             if row["env_managed"] or row["role"] == "admin":
                 raise HTTPException(403, "Учётная запись администратора управляется только через .env.")
-            admin_id = db.execute("SELECT id FROM users WHERE env_managed=1").fetchone()["id"]
+            admin_id = user["team_id"]
             transferred = db.execute("UPDATE recurring_payments SET owner_id=? WHERE owner_id=?", (admin_id, user_id)).rowcount
             db.execute("DELETE FROM users WHERE id=?", (user_id,))
             audit(db, user, "user_deleted", "Удалён пользователь: " + row["username"] + "; передано платежей администратору: " + str(transferred))
@@ -485,19 +513,21 @@ def create_app(settings: Settings | None = None):
         cfg = request.app.state.settings
         from .telegram_connections import is_connected
         with connect(cfg) as db:
-            configured = is_connected(db, cfg)
+            configured = is_connected(db, cfg, user["team_id"])
         return {"timezone": cfg.timezone, "today": cfg.today.isoformat(), "telegram_configured": configured, "reminder_days": 3, "product_name": "Учёт регулярных платежей", "integration_mode": "manual"}
 
     @app.get("/api/v1/activity", tags=["Система"], summary="Получить журнал действий", description="Только администратор. Возвращает последние события входа, изменения платежей и управления пользователями. Пароли и токены в журнале не сохраняются.")
     def activity(request: Request, limit: int = Query(default=30, ge=1, le=100, title="Количество событий", description="Сколько последних событий вернуть: от 1 до 100, по умолчанию 30."), user=Depends(admin)):
         with connect(request.app.state.settings) as db:
-            return [dict(row) for row in db.execute("SELECT id,username,action,description,created_at FROM audit_events ORDER BY id DESC LIMIT ?", (limit,))]
+            return [dict(row) for row in db.execute("SELECT id,username,action,description,created_at FROM audit_events WHERE team_id=? ORDER BY id DESC LIMIT ?", (user["team_id"], limit))]
 
     @app.get("/api/v1/reminders", tags=["Система"], summary="Проверить очередь напоминаний", description="Только администратор. Возвращает состояние и число попыток отправки последних 100 напоминаний. Неопределённая доставка имеет статус unknown: автоматический повтор отключён до ручной проверки чата.")
     def reminders(request: Request, user=Depends(admin)):
         with connect(request.app.state.settings) as db:
             return [dict(row) for row in db.execute("""SELECT b.id,b.occurrence_id,b.state,b.attempts,b.next_attempt_at,b.sent_at,b.last_error,o.name,o.due_date
-              FROM reminder_outbox b JOIN payment_occurrences o ON o.id=b.occurrence_id ORDER BY b.id DESC LIMIT 100""")]
+              FROM reminder_outbox b JOIN payment_occurrences o ON o.id=b.occurrence_id
+              JOIN recurring_payments r ON r.id=o.recurring_payment_id JOIN users owner ON owner.id=r.owner_id
+              WHERE owner.team_id=? ORDER BY b.id DESC LIMIT 100""", (user["team_id"],))]
 
     from .invitations import register_routes as register_invitation_routes
     register_invitation_routes(app, current, admin)

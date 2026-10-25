@@ -27,7 +27,7 @@ import httpx
 
 from .config import load_settings
 from .db import connect, initialize, transaction
-from .telegram_connections import GROUP_TYPES, active_connection, disconnect, group_id, record_candidate
+from .telegram_connections import GROUP_TYPES, disconnect, group_id, record_candidate
 
 logger = logging.getLogger("invoice_keeper.telegram_bot")
 POLL_SECONDS = 20
@@ -206,9 +206,9 @@ def handle_update(settings,db,update,bot_username=None,client=None,bot_id=None,n
         can_send=status in {"creator","administrator","member"} or (status=="restricted" and member.get("is_member") is True and member.get("can_send_messages") is True)
         if not can_send:
             with transaction(db):
-                active=active_connection(db,settings)
-                if active and active["chat_id"]==cid:
-                    disconnect(db,reason="bot_removed_or_restricted")
+                active=db.execute("SELECT * FROM telegram_connection WHERE chat_id=? AND active=1 AND bot_scope=?", (cid,token_scope(settings.telegram_bot_token))).fetchone()
+                if active:
+                    disconnect(db,reason="bot_removed_or_restricted",team_id=active['id'])
                 db.execute("UPDATE telegram_link_requests SET state='revoked' WHERE chat_id=? AND state IN ('pending','candidate')",(cid,))
         return None
     if message.get("migrate_to_chat_id") or message.get("migrate_from_chat_id"):
@@ -216,9 +216,9 @@ def handle_update(settings,db,update,bot_username=None,client=None,bot_id=None,n
         # confirmation instead of forwarding an old queue to a new chat ID.
         old=group_id(message.get("migrate_from_chat_id")) or cid
         with transaction(db):
-            active=active_connection(db,settings)
-            if active and active["chat_id"]==old:
-                disconnect(db,reason="group_migrated_reconnect_required")
+            active=db.execute("SELECT * FROM telegram_connection WHERE chat_id=? AND active=1 AND bot_scope=?", (old,token_scope(settings.telegram_bot_token))).fetchone()
+            if active:
+                disconnect(db,reason="group_migrated_reconnect_required",team_id=active['id'])
         return None
     content=message.get("text","").split(maxsplit=1)
     addressed=content[0].split("@",1)

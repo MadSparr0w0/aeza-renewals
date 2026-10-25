@@ -545,10 +545,12 @@ export function EditRecurringModal({
 }
 export function UserModal({
   user,
+  newAdmin = false,
   onClose,
   onSuccess,
 }: {
   user: User | "new";
+  newAdmin?: boolean;
   onClose: () => void;
   onSuccess: () => void;
 }) {
@@ -567,7 +569,7 @@ export function UserModal({
     setBusy(true);
     setError("");
     try {
-      await api(`/users${isNew ? "" : `/${user.id}`}`, {
+      await api(newAdmin ? "/admins" : `/users${isNew ? "" : `/${user.id}`}`, {
         method: isNew ? "POST" : "PATCH",
         body: JSON.stringify(body),
       });
@@ -580,8 +582,8 @@ export function UserModal({
   }
   return (
     <Modal
-      title={isNew ? "Создать аккаунт" : "Изменить пользователя"}
-      subtitle="Учётная запись участника команды."
+      title={newAdmin ? "Создать администратора" : isNew ? "Создать аккаунт" : "Изменить пользователя"}
+      subtitle={newAdmin ? "Отдельная команда со своей группой Telegram. Передайте пароль администратору безопасным способом." : "Учётная запись участника команды."}
       onClose={onClose}
     >
       <form onSubmit={submit}>

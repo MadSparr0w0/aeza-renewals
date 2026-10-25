@@ -4,6 +4,7 @@ export type User = {
   username: string;
   full_name: string;
   role: "admin" | "user";
+  env_managed: boolean;
 };
 export type Session = { user: User; csrf_token: string };
 export type Occurrence = {

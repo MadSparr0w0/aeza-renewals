@@ -51,7 +51,7 @@ def team(cfg):
     with connect(cfg) as db, transaction(db):
         ids = {"admin": db.execute("SELECT id FROM users WHERE env_managed=1").fetchone()[0]}
         for username, name in (("alice", "Алиса"), ("boris", "Борис")):
-            ids[username] = db.execute("INSERT INTO users(username,full_name,password_hash,role,created_at) VALUES(?,?,?,'user',?)", (username, name, ENCODED, utcnow())).lastrowid
+            ids[username] = db.execute("INSERT INTO users(username,full_name,password_hash,role,created_at,team_id) VALUES(?,?,?,'user',?,?)", (username, name, ENCODED, utcnow(), ids["admin"])).lastrowid
     with ExitStack() as stack:
         clients = {name: stack.enter_context(TestClient(create_app(cfg))) for name in ids}
         headers = {name: login(client, name) for name, client in clients.items()}

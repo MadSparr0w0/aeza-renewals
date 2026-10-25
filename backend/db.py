@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS users (
  id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE,
  full_name TEXT NOT NULL, password_hash TEXT NOT NULL,
  role TEXT NOT NULL CHECK(role IN ('admin','user')),
+ team_id INTEGER REFERENCES users(id),
  env_managed INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS sessions (
@@ -41,14 +42,15 @@ CREATE TABLE IF NOT EXISTS reminder_outbox (
 );
 CREATE TABLE IF NOT EXISTS audit_events (
  id INTEGER PRIMARY KEY, user_id INTEGER, username TEXT NOT NULL,
- action TEXT NOT NULL, description TEXT NOT NULL, created_at TEXT NOT NULL
+ action TEXT NOT NULL, description TEXT NOT NULL, created_at TEXT NOT NULL,
+ team_id INTEGER REFERENCES users(id)
 );
 CREATE TABLE IF NOT EXISTS invitations (
  id INTEGER PRIMARY KEY, username TEXT NOT NULL COLLATE NOCASE, full_name TEXT NOT NULL,
  token_hash TEXT NOT NULL UNIQUE, expires_at INTEGER NOT NULL, created_at TEXT NOT NULL,
  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
  accepted_at INTEGER, accepted_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
- revoked_at INTEGER
+ revoked_at INTEGER, team_id INTEGER REFERENCES users(id)
 );
 CREATE INDEX IF NOT EXISTS ix_invitations_username ON invitations(username);
 """
@@ -115,6 +117,16 @@ def initialize(settings):
                 db.execute("INSERT INTO users(id,username,full_name,password_hash,role,env_managed,created_at) VALUES(?,?,?,?,'admin',1,?)",
                            (next_user_id(db), settings.admin_username, "Администратор", settings.admin_password_hash, utcnow()))
             admin_id = db.execute("SELECT id FROM users WHERE env_managed=1").fetchone()["id"]
+            # Existing installations become the first isolated team. A team is
+            # identified by its administrator's user id; sessions keep their ids.
+            if "team_id" not in {r["name"] for r in db.execute("PRAGMA table_info(users)")}:
+                db.execute("ALTER TABLE users ADD COLUMN team_id INTEGER REFERENCES users(id)")
+            db.execute("UPDATE users SET team_id=? WHERE team_id IS NULL", (admin_id,))
+            db.execute("CREATE INDEX IF NOT EXISTS ix_users_team ON users(team_id,role)")
+            for table in ("invitations", "audit_events"):
+                if "team_id" not in {r["name"] for r in db.execute("PRAGMA table_info(" + table + ")")}:
+                    db.execute("ALTER TABLE " + table + " ADD COLUMN team_id INTEGER REFERENCES users(id)")
+                db.execute("UPDATE " + table + " SET team_id=? WHERE team_id IS NULL", (admin_id,))
             columns = {row["name"] for row in db.execute("PRAGMA table_info(recurring_payments)")}
             if "owner_id" not in columns:
                 # SQLite cannot add a NOT NULL foreign key without a constant
@@ -136,5 +148,6 @@ def initialize(settings):
 
 
 def audit(db, user, action, description):
-    db.execute("INSERT INTO audit_events(user_id,username,action,description,created_at) VALUES(?,?,?,?,?)",
-               (user["id"] if user else None, user["username"] if user else "system", action, description, utcnow()))
+    db.execute("INSERT INTO audit_events(user_id,username,action,description,created_at,team_id) VALUES(?,?,?,?,?,?)",
+               (user["id"] if user else None, user["username"] if user else "system", action, description, utcnow(),
+                user["team_id"] if user else None))
