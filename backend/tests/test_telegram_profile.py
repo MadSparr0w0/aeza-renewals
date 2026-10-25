@@ -8,6 +8,7 @@ from scripts.configure_telegram import ProfileError, api_call, configure, read_p
 
 def test_profile_public_and_chat_scopes_and_readback():
     profile = read_profile(ROOT / "assets/telegram/profile.json")
+    assert {item["command"] for item in profile["commands"]} == {"start", "help", "connect"}
     public = [item for item in profile["commands"] if item["command"] in {"start", "help"}]
     requests = []
 
