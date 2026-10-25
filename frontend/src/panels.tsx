@@ -11,7 +11,16 @@ import {
   Trash2,
 } from "lucide-react";
 import BrandIcon from "./BrandIcon";
-import type { Currency, Occurrence, Session, Settings, User } from "./api";
+import type {
+  Currency,
+  Invitation,
+  Occurrence,
+  Session,
+  Settings,
+  User,
+} from "./api";
+import { invitationDate } from "./AccountForms";
+import TelegramConnection from "./TelegramConnection";
 import {
   dateLabel,
   Empty,
@@ -72,11 +81,11 @@ export function OverviewMiddle({
             <span className="reminder-card-icon">
               <BrandIcon name="telegram" size={21} />
             </span>
-            <h2>Напоминания о продлении</h2>
+            <h2>Напоминания в Telegram</h2>
           </div>
           <p>
-            За {settings?.reminder_days || 3} дня до продления — услуга,
-            стоимость и срок в чате Telegram. Оплаченные периоды пропускаются.
+            За {settings?.reminder_days || 3} дня до срока оплаты. Оплаченные
+            периоды пропускаются.
           </p>
           <div className="reminder-card-footer">
             <span
@@ -135,9 +144,9 @@ export function OverviewMiddle({
         </div>
         <p className="orbits-caption">
           {hasData
-            ? `${paidCount} из ${totalCount} продлений оплачено`
+            ? `${paidCount} из ${totalCount} платежей оплачено`
             : amounts
-              ? "Нет продлений в выбранной валюте"
+              ? "Нет платежей в выбранной валюте"
               : "Загружаем итоги…"}
         </p>
       </div>
@@ -157,7 +166,7 @@ export function OverviewBottom({
     <section className="bottom-grid">
       <div className="upcoming-card">
         <div className="simple-card-heading">
-          <h2>Ближайшие продления</h2>
+          <h2>Ближайшие платежи</h2>
           <button className="text-button" onClick={onCalendar}>
             Открыть календарь <ArrowUpRight size={15} />
           </button>
@@ -188,7 +197,7 @@ export function OverviewBottom({
         ) : (
           <div className="upcoming-empty">
             <CheckCircle2 size={23} />
-            <span>Ближайших неоплаченных продлений нет.</span>
+            <span>Ближайших неоплаченных платежей нет.</span>
           </div>
         )}
       </div>
@@ -254,6 +263,13 @@ export function Calendar({
                   >
                     <span>{item.name}</span>
                     <strong>{money(item.amount, item.currency)}</strong>
+                    <span className="calendar-event-state">
+                      {item.is_paid
+                        ? "Оплачено"
+                        : item.status === "overdue"
+                          ? "Просрочено"
+                          : "К оплате"}
+                    </span>
                   </button>
                 ))}
               </div>
@@ -305,7 +321,7 @@ export function Calendar({
                               : item.status === "overdue"
                                 ? `Просрочка: ${item.overdue_days} ${plural(item.overdue_days, ["день", "дня", "дней"])}`
                                 : item.recurring_active
-                                  ? "Ежемесячное продление"
+                                  ? "Ежемесячный платёж"
                                   : "Учёт прекращён"}
                           </small>
                         </span>
@@ -321,7 +337,7 @@ export function Calendar({
           ))
         ) : (
           <Empty
-            title="В этом месяце продлений нет"
+            title="В этом месяце платежей нет"
             text="Выберите другой месяц."
           />
         )}
@@ -334,11 +350,15 @@ export function Team({
   session,
   onEdit,
   onDelete,
+  invitations,
+  onRevokeInvitation,
 }: {
   users: User[];
   session: Session;
   onEdit: (u: User) => void;
   onDelete: (u: User) => void;
+  invitations: Invitation[];
+  onRevokeInvitation: (invitation: Invitation) => void;
 }) {
   return (
     <section className="team-card">
@@ -377,7 +397,7 @@ export function Team({
                 </span>
               </td>
               <td>
-                <span className="access-label">Управление модулем</span>
+                <span className="access-label">Все платежи и участники</span>
               </td>
               <td>
                 <LockKeyhole size={15} className="muted" />
@@ -401,7 +421,7 @@ export function Team({
                   </td>
                   <td>
                     <span className="access-label">
-                      Просмотр и отметка оплаты
+                      Управление своими платежами
                     </span>
                   </td>
                   <td>
@@ -427,6 +447,63 @@ export function Team({
           </tbody>
         </table>
       </div>
+      <div className="invitations-section">
+        <h2>
+          Приглашения <span>{invitations.length}</span>
+        </h2>
+        {invitations.length ? (
+          <div className="table-scroll">
+            <table className="invitations-table">
+              <thead>
+                <tr>
+                  <th>Участник</th>
+                  <th>Логин</th>
+                  <th>Действует до</th>
+                  <th>Статус</th>
+                  <th>
+                    <span className="sr-only">Действия</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {invitations.map((invitation) => (
+                  <tr key={invitation.id}>
+                    <td>
+                      <strong>{invitation.full_name}</strong>
+                    </td>
+                    <td>{invitation.username}</td>
+                    <td>{invitationDate(invitation.expires_at)}</td>
+                    <td>
+                      <span className="role-badge">
+                        {
+                          {
+                            active: "Ожидает активации",
+                            accepted: "Принято",
+                            revoked: "Отозвано",
+                            expired: "Истекло",
+                          }[invitation.status]
+                        }
+                      </span>
+                    </td>
+                    <td>
+                      {invitation.status === "active" && (
+                        <button
+                          className="text-button"
+                          onClick={() => onRevokeInvitation(invitation)}
+                        >
+                          Отозвать
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p>Приглашений пока нет.</p>
+        )}
+      </div>
     </section>
   );
 }
@@ -434,47 +511,56 @@ export function SettingsPanel({
   settings,
   activeCount,
   onActivity,
+  onChangePassword,
+  canConfigureTelegram,
+  onTelegramChanged,
 }: {
   settings: Settings | null;
   activeCount: number;
   onActivity?: () => void;
+  onChangePassword?: () => void;
+  canConfigureTelegram?: boolean;
+  onTelegramChanged?: () => void;
 }) {
   return (
     <div className="settings-grid">
-      <section className="settings-card">
-        <div className="settings-icon">
-          <BrandIcon name="telegram" size={22} />
-        </div>
-        <div className="settings-card-title">
-          <h2>Напоминания о продлении</h2>
-          <span
-            className={`status ${settings?.telegram_configured ? "paid" : "pending"}`}
-          >
-            <i />
-            {settings?.telegram_configured ? "Подключено" : "Не настроено"}
-          </span>
-        </div>
-        <p>
-          Бот{" "}
-          <a
-            href="https://t.me/aezainkeep_bot"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            @aezainkeep_bot
-          </a>{" "}
-          присылает услугу, стоимость, валюту и срок продления в настроенный чат
-          Telegram.
-        </p>
-        <div className="setting-line">
-          <span>Когда напоминать</span>
-          <strong>За {settings?.reminder_days || 3} дня до срока</strong>
-        </div>
-        <div className="setting-line">
-          <span>Оплаченные периоды</span>
-          <strong>Не напоминаем</strong>
-        </div>
-      </section>
+      {canConfigureTelegram ? (
+        <TelegramConnection onChanged={onTelegramChanged} />
+      ) : (
+        <section className="settings-card">
+          <div className="settings-icon">
+            <BrandIcon name="telegram" size={22} />
+          </div>
+          <div className="settings-card-title">
+            <h2>Напоминания в Telegram</h2>
+            <span
+              className={`status ${settings?.telegram_configured ? "paid" : "pending"}`}
+            >
+              <i />
+              {settings?.telegram_configured ? "Подключено" : "Не настроено"}
+            </span>
+          </div>
+          <p>
+            Бот{" "}
+            <a
+              href="https://t.me/aezainkeep_bot"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              @aezainkeep_bot
+            </a>{" "}
+            отправляет уведомления о платежах в общий чат команды.
+          </p>
+          <div className="setting-line">
+            <span>Когда напоминать</span>
+            <strong>За {settings?.reminder_days || 3} дня до срока</strong>
+          </div>
+          <div className="setting-line">
+            <span>Оплаченные периоды</span>
+            <strong>Не напоминаем</strong>
+          </div>
+        </section>
+      )}
       <section className="settings-card">
         <div className="settings-icon gray">
           <BrandIcon name="settings" size={22} />
@@ -493,9 +579,17 @@ export function SettingsPanel({
           <strong>RUB · USD · EUR</strong>
         </div>
         <div className="setting-line">
-          <span>Услуг на учёте</span>
+          <span>Регулярных платежей</span>
           <strong>{activeCount}</strong>
         </div>
+        {onChangePassword && (
+          <button
+            className="button secondary settings-password-button"
+            onClick={onChangePassword}
+          >
+            Сменить пароль
+          </button>
+        )}
       </section>
       <a
         className="api-docs-link"

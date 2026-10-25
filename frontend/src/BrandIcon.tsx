@@ -2,7 +2,7 @@ import type { ReactNode, SVGProps } from "react";
 
 export type BrandIconName =
   | "overview"
-  | "services"
+  | "payments"
   | "calendar"
   | "history"
   | "users"
@@ -21,12 +21,11 @@ const shapes: Record<BrandIconName, ReactNode> = {
       <rect x="13" y="13" width="8" height="8" rx="2" />
     </>
   ),
-  services: (
-    <>
-      <rect x="3" y="3" width="18" height="5" rx="2" />
-      <rect x="3" y="10" width="18" height="5" rx="2" />
-      <rect x="3" y="17" width="18" height="4" rx="2" />
-    </>
+  payments: (
+    <path
+      fillRule="evenodd"
+      d="M6 2h12a2 2 0 0 1 2 2v18l-4-2-4 2-4-2-4 2V4a2 2 0 0 1 2-2Zm2 5v2h8V7H8Zm0 5v2h8v-2H8Z"
+    />
   ),
   calendar: (
     <path

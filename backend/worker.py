@@ -15,6 +15,7 @@ import httpx
 from .config import load_settings
 from .db import connect, initialize, transaction, utcnow
 from .domain import materialize, money, schedule_reminders
+from .telegram_connections import active_connection, group_id, recover_expired_deliveries, token_scope
 
 logger = logging.getLogger("invoice_keeper.worker")
 LEASE_SECONDS = 60
@@ -48,14 +49,17 @@ def claim(db, owner: str, now: int):
     Keep it unknown for human investigation instead of risking a duplicate.
     """
     with transaction(db):
-        db.execute("UPDATE reminder_outbox SET state='unknown',last_error='lease_expired_delivery_unknown',lease_owner=NULL,lease_until=NULL WHERE state='sending' AND lease_until<=?", (now,))
+        recover_expired_deliveries(db,now)
         db.execute("""UPDATE reminder_outbox SET state='cancelled',lease_owner=NULL,lease_until=NULL
           WHERE state IN ('pending','retry') AND occurrence_id IN
           (SELECT o.id FROM payment_occurrences o JOIN recurring_payments r ON r.id=o.recurring_payment_id WHERE o.is_paid=1 OR r.active=0)""")
-        row = db.execute("""SELECT b.id,o.id AS occurrence_id,o.name,o.amount_minor,o.currency,o.due_date,b.attempts
+        row = db.execute("""SELECT b.id,o.id AS occurrence_id,o.name,o.amount_minor,o.currency,o.due_date,b.attempts,
+          b.recipient_chat_id,b.delivery_scope,u.full_name AS owner_name
           FROM reminder_outbox b JOIN payment_occurrences o ON o.id=b.occurrence_id
           JOIN recurring_payments r ON r.id=o.recurring_payment_id
+          JOIN users u ON u.id=r.owner_id JOIN telegram_connection c ON c.id=1 AND c.active=1
           WHERE b.state IN ('pending','retry') AND b.next_attempt_at<=? AND o.is_paid=0 AND r.active=1
+          AND c.chat_type IN ('group','supergroup') AND b.recipient_chat_id=c.chat_id AND b.delivery_scope=c.bot_scope
           ORDER BY o.due_date,b.id LIMIT 1""", (now,)).fetchone()
         if not row:
             return None
@@ -69,22 +73,29 @@ def deliver(settings, row, client=None):
     Telegram sendMessage has no idempotency key. Read/write timeout, malformed
     success response or worker crash cannot safely be retried automatically.
     """
+    recipient = group_id(row.get("recipient_chat_id"))
+    if (recipient is None or not settings.telegram_bot_token
+            or row.get("delivery_scope") != token_scope(settings.telegram_bot_token)):
+        return SendResult("cancelled", "unconfirmed_group_destination")
     whole, cents = money(row["amount_minor"]).split(".")
     amount = f"{int(whole):,}".replace(",", " ") + ("," + cents if cents != "00" else "")
     currency = {"RUB": "₽", "USD": "$", "EUR": "€"}.get(row["currency"], row["currency"])
     due = date.fromisoformat(row["due_date"])
-    text = ("⏰ <b>Aéza · Срок продления</b>\n\n<b>" + escape(row["name"]) + "</b>\n"
+    text = ("⏰ <b>Регулярный платёж</b>\n\n👤 " + escape(row["owner_name"])
+            + "\n🧾 <b>" + escape(row["name"]) + "</b>\n"
             + amount + " " + escape(currency) + "\nСрок оплаты: " + due.strftime("%d.%m.%Y")
-            + "\n\nОплата этого периода не отмечена в панели. Данные учёта ведутся вручную.")
+            + "\n\nОплата пока не отмечена.")
+    payload = {"chat_id": recipient, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+    from .telegram_bot import module_url
+    url = module_url(settings.origin)
+    if url:
+        payload["reply_markup"] = {"inline_keyboard": [[{"text": "Открыть веб-панель", "url": url}]]}
     own = client is None
     if own:
         client = make_telegram_client()
     try:
         # URL and exceptions are deliberately never logged: the URL contains a secret.
-        with client.stream("POST", "https://api.telegram.org/bot" + settings.telegram_bot_token + "/sendMessage", json={
-            "chat_id": settings.telegram_chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True,
-            "reply_markup": {"inline_keyboard": [[{"text": "Открыть меню", "callback_data": "ik:menu:" + settings.today.strftime("%Y-%m") + ":0"}]]},
-        }) as response:
+        with client.stream("POST", "https://api.telegram.org/bot" + settings.telegram_bot_token + "/sendMessage", json=payload) as response:
             content = bytearray()
             for chunk in response.iter_bytes():
                 content.extend(chunk)
@@ -138,9 +149,11 @@ def tick(settings, owner=None, sender=deliver, now=None):
     now = int(time.time()) if now is None else now
     with connect(settings) as db:
         with transaction(db):
+            recover_expired_deliveries(db,now)
             materialize(db, settings.today)
             schedule_reminders(db, settings.today)
-        if not settings.telegram_bot_token or not settings.telegram_chat_id:
+        connection = active_connection(db, settings)
+        if connection is None:
             return False
         row = claim(db, owner, now)
         if not row:
@@ -148,7 +161,10 @@ def tick(settings, owner=None, sender=deliver, now=None):
         # Recheck immediately before the external side effect. A concurrent edit
         # after this check cannot retract an already sent Telegram message.
         valid = db.execute("""SELECT 1 FROM reminder_outbox b JOIN payment_occurrences o ON o.id=b.occurrence_id JOIN recurring_payments r ON r.id=o.recurring_payment_id
-          WHERE b.id=? AND b.state='sending' AND b.lease_owner=? AND o.is_paid=0 AND r.active=1""", (row["id"], owner)).fetchone()
+          JOIN telegram_connection c ON c.id=1 AND c.active=1
+          WHERE b.id=? AND b.state='sending' AND b.lease_owner=? AND o.is_paid=0 AND r.active=1
+          AND b.recipient_chat_id=c.chat_id AND b.delivery_scope=c.bot_scope AND c.bot_scope=?
+          AND c.chat_type IN ('group','supergroup')""", (row["id"], owner,token_scope(settings.telegram_bot_token))).fetchone()
         if not valid:
             with transaction(db):
                 db.execute("UPDATE reminder_outbox SET state='cancelled',lease_owner=NULL,lease_until=NULL WHERE id=? AND state='sending' AND lease_owner=?", (row["id"], owner))
@@ -172,8 +188,8 @@ def main(argv=None):
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     settings = load_settings()
     initialize(settings)
-    if not settings.telegram_bot_token or not settings.telegram_chat_id:
-        logger.info("Telegram не настроен: задачи сохраняются, сетевые запросы не выполняются.")
+    if not settings.telegram_bot_token:
+        logger.info("Бот не настроен: сетевые запросы не выполняются.")
     stopping = False
 
     def stop(*_):

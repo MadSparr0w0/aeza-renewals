@@ -1,0 +1,95 @@
+.account-forms__accept-page {
+  min-height: 100dvh;
+  padding: 36px;
+  background: var(--bg);
+}
+.account-forms__accept-page > .brand {
+  margin: 0 auto 52px;
+}
+.account-forms__accept-card {
+  width: 100%;
+  max-width: 440px;
+  margin: 0 auto;
+  padding: 30px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.account-forms__accept-card h1 {
+  margin: 0 0 24px;
+  font-size: 28px;
+  font-weight: 550;
+  line-height: 1.2;
+}
+.account-forms__identity {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 18px;
+}
+.account-forms__identity strong {
+  font-size: 17px;
+  font-weight: 550;
+  overflow-wrap: anywhere;
+}
+.account-forms__identity span {
+  color: var(--muted);
+  font: 12px/1.5 var(--font-ui);
+  overflow-wrap: anywhere;
+}
+.account-forms__hint,
+.account-forms__invitation-result > p {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+.account-forms__invitation-result > label {
+  display: grid;
+  gap: 9px;
+  margin-bottom: 14px;
+  font: 12px/1.6 var(--font-ui);
+}
+.account-forms__invitation-result input {
+  width: 100%;
+  min-width: 0;
+  min-height: 46px;
+  padding: 12px;
+  border: 1px solid #505050;
+  border-radius: 8px;
+  background: #171717;
+  color: #ededed;
+  font: 13px/1.5 var(--font-ui);
+  user-select: text;
+}
+.account-forms__copy-status {
+  min-height: 23px;
+  margin-bottom: 12px;
+  color: #dedede;
+  font-size: 12px;
+}
+.account-forms__wide {
+  width: 100%;
+}
+.account-forms__back {
+  margin-top: 22px;
+}
+.account-forms__accept-card .loading-block {
+  min-height: 150px;
+  font-size: 13px;
+}
+@media (max-width: 600px) {
+  .account-forms__accept-page {
+    padding: 28px 16px;
+  }
+  .account-forms__accept-page > .brand {
+    margin-bottom: 36px;
+  }
+  .account-forms__accept-card {
+    padding: 26px 21px;
+  }
+  .account-forms__accept-card h1 {
+    font-size: 26px;
+  }
+  .account-forms__invitation-result input {
+    font-size: 16px;
+  }
+}

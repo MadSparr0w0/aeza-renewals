@@ -17,13 +17,14 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import ROOT, Settings, load_settings
-from .db import audit, connect, initialize, transaction, utcnow
+from .db import audit, connect, initialize, next_user_id, transaction, utcnow
 from .domain import CURRENCIES, add_recurring, amount_minor, materialize, money, month_end, occurrence_json, schedule_reminders
-from .models import Login, OccurrencePatch, RecurringCreate, RecurringUpdate, UserCreate, UserPatch
+from .models import Login, OccurrencePatch, PasswordChange, RecurringCreate, RecurringUpdate, UserCreate, UserPatch
 from .security import csrf_token, digest, hash_password, verify_password
 
 COOKIE = "ik_session"
-OCCURRENCES = "SELECT o.*,r.active AS recurring_active FROM payment_occurrences o JOIN recurring_payments r ON r.id=o.recurring_payment_id"
+OCCURRENCES = "SELECT o.*,r.active AS recurring_active,r.owner_id,owner.full_name AS owner_name FROM payment_occurrences o JOIN recurring_payments r ON r.id=o.recurring_payment_id JOIN users owner ON owner.id=r.owner_id"
+RECURRING = "SELECT r.*,owner.full_name AS owner_name FROM recurring_payments r JOIN users owner ON owner.id=r.owner_id"
 # A fixed valid hash preserves the expensive password-check path for unknown users.
 DUMMY_HASH = "scrypt$16384$8$5$" + "00" * 16 + "$" + "00" * 64
 
@@ -72,10 +73,10 @@ def create_app(settings: Settings | None = None):
             schedule_reminders(db, app.state.settings.today)
         yield
 
-    app = FastAPI(title="Aéza · API контроля продлений", version="1.0.0", description="Aéza · Контроль продлений: ежемесячные сроки серверов и инфраструктурных услуг, история ручных отметок оплаты, две роли и напоминания в Telegram. Данные вносятся командой вручную. Отметка оплаты не проводит платёж, создание записи не покупает услугу, а прекращение учёта не выключает и не удаляет сервер. Реальная оплата и управление услугами выполняются отдельно в кабинете Aéza. Сначала войдите в нашу веб-панель и откройте документацию в том же браузере: защищённый сессионный cookie HttpOnly отправляется автоматически. Для изменяющих запросов скопируйте csrf_token из ответа GET /api/v1/auth/me в поле csrfHeader окна «Авторизация». Копировать или вводить сессионный cookie не нужно. Запросы из браузера должны исходить с разрешённого адреса приложения.", docs_url=None, openapi_url="/api/v1/openapi.json", redoc_url=None, lifespan=lifespan,
+    app = FastAPI(title="API регулярных платежей", version="1.1.0", description="Учёт ежемесячных расходов команды: коммунальные услуги, аренда, подписки и другие платежи. Участник видит и меняет свои записи; администратор управляет всеми платежами и участниками. Оплата отмечается вручную и не проводит банковскую операцию. Telegram отправляет уведомления только в подтверждённую общую группу, где участники видят владельца, название, сумму, валюту и срок. Сначала войдите в веб-панель и откройте документацию в том же браузере: сессионный cookie HttpOnly передаётся автоматически. Для изменяющих запросов скопируйте csrf_token из GET /api/v1/auth/me в csrfHeader окна «Авторизация». Сессионный cookie вручную вводить не нужно.", docs_url=None, openapi_url="/api/v1/openapi.json", redoc_url=None, lifespan=lifespan,
                   openapi_tags=[{"name": "Система", "description": "Состояние приложения, общие настройки и журнал действий."},
                                 {"name": "Авторизация", "description": "Вход, проверка текущей учётной записи и завершение сессии."},
-                                {"name": "Регулярные платежи", "description": "Ручной учёт ежемесячных продлений серверов и услуг с сохранением истории."},
+                                {"name": "Регулярные платежи", "description": "Ежемесячные расходы с владельцем и сохранением истории."},
                                 {"name": "Периоды оплаты", "description": "Сроки, ручные отметки, фактические даты оплаты и просрочка отдельных периодов."},
                                 {"name": "Итоги", "description": "Плановые, оплаченные, неоплаченные и просроченные суммы отдельно по валютам."},
                                 {"name": "Пользователи", "description": "Управление обычными пользователями. Доступно только администратору."}])
@@ -146,7 +147,14 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(403, "Доступно только администратору.")
         return user
 
-    def refresh(db, cfg, month=None):
+    def owner_scope(user, alias="r"):
+        return ("", ()) if user["role"] == "admin" else (" AND " + alias + ".owner_id=?", (user["id"],))
+
+    def recurring_row(db, payment_id, user):
+        condition, values = owner_scope(user)
+        return db.execute(RECURRING + " WHERE r.id=?" + condition, (payment_id, *values)).fetchone()
+
+    def refresh(db, cfg, month=None, user=None):
         horizon = None
         if month:
             if not re.fullmatch(r"\d{4}-\d{2}", month):
@@ -158,16 +166,17 @@ def create_app(settings: Settings | None = None):
             if first.year < 2000 or first.year > cfg.today.year + 5:
                 raise HTTPException(422, "Допустимы месяцы от 2000 года до пяти лет вперёд.")
             horizon = month_end(first)
-        materialize(db, cfg.today, horizon)
-        schedule_reminders(db, cfg.today)
+        owner_id = user["id"] if user and user["role"] != "admin" else None
+        materialize(db, cfg.today, horizon, owner_id=owner_id)
+        schedule_reminders(db, cfg.today, owner_id=owner_id)
 
-    def recurring_json(db, row, today):
+    def recurring_json(db, row, today, user):
         due = db.execute("SELECT MIN(due_date) FROM payment_occurrences WHERE recurring_payment_id=? AND due_date>=?", (row["id"], today.isoformat())).fetchone()[0]
-        return {"id": row["id"], "name": row["name"], "amount": money(row["amount_minor"]), "currency": row["currency"], "next_due_date": due or row["next_materialize_date"], "anchor_day": row["anchor_day"], "frequency": "monthly", "active": bool(row["active"])}
+        return {"id": row["id"], "name": row["name"], "amount": money(row["amount_minor"]), "currency": row["currency"], "next_due_date": due or row["next_materialize_date"], "anchor_day": row["anchor_day"], "frequency": "monthly", "active": bool(row["active"]), "owner_id": row["owner_id"], "owner_name": row["owner_name"], "can_manage": user["role"] == "admin" or user["id"] == row["owner_id"]}
 
     @app.get("/api/v1/docs", include_in_schema=False)
     def swagger_docs(user=Depends(current)):
-        page = get_swagger_ui_html(openapi_url="/api/v1/openapi.json", title="Aéza · API контроля продлений — документация",
+        page = get_swagger_ui_html(openapi_url="/api/v1/openapi.json", title="API регулярных платежей — документация",
                                    swagger_js_url="/api/v1/docs-assets/swagger-ui-bundle.js",
                                    swagger_css_url="/api/v1/docs-assets/swagger-ui.css",
                                    swagger_favicon_url="/favicon.svg",
@@ -188,7 +197,7 @@ def create_app(settings: Settings | None = None):
     def health():
         return {"status": "ok"}
 
-    @app.post("/api/v1/auth/login", tags=["Авторизация"], summary="Войти в систему", description="Проверяет локальную учётную запись панели контроля продлений, устанавливает защищённый сессионный cookie и возвращает пользователя вместе с csrf_token. Это отдельный вход, он не авторизует пользователя в кабинете провайдера Aéza. Повторные неудачные попытки входа ограничены.")
+    @app.post("/api/v1/auth/login", tags=["Авторизация"], summary="Войти в систему", description="Проверяет учётную запись модуля, устанавливает сессионный cookie и возвращает пользователя вместе с csrf_token. Повторные попытки входа ограничены. Вход не даёт доступа к чужим платежам обычному участнику.")
     def login(body: Login, request: Request, response: Response):
         cfg = request.app.state.settings
         now = int(time.time())
@@ -237,38 +246,70 @@ def create_app(settings: Settings | None = None):
             audit(db, user, "logout", "Выход из системы")
         response.delete_cookie(COOKIE, path="/", httponly=True, secure=cfg.cookie_secure, samesite="strict")
 
-    @app.get("/api/v1/recurring-payments", tags=["Регулярные платежи"], summary="Получить регулярные платежи", description="Возвращает правила ежемесячного учёта продлений серверов и услуг. Это записи команды, а не сведения о фактическом состоянии серверов у провайдера. По умолчанию показаны действующие правила учёта; прекращённые можно включить отдельным параметром.")
+    @app.post("/api/v1/auth/password", status_code=204, tags=["Авторизация"], summary="Сменить свой пароль", description="Обычный участник указывает текущий и новый пароль. После успешной смены все его сессии отзываются и нужен повторный вход. Конфигурационный администратор управляется только окружением.")
+    def password_change(body: PasswordChange, request: Request, response: Response, user=Depends(current)):
+        cfg = request.app.state.settings
+        if user["env_managed"] or user["role"] == "admin":
+            raise HTTPException(403, "Пароль администратора управляется только через окружение.")
+        now = int(time.time())
+        key = digest(cfg.app_secret, "password-change:" + str(user["id"]))
+        with connect(cfg) as db, transaction(db):
+            db.execute("DELETE FROM login_attempts WHERE created_at<?", (now - 900,))
+            count = db.execute("SELECT COUNT(*) FROM login_attempts WHERE key=? AND created_at>?", (key, now - 600)).fetchone()[0]
+            if count >= 8:
+                raise HTTPException(429, "Слишком много попыток смены пароля. Повторите через 10 минут.", headers={"Retry-After": "600"})
+            db.execute("INSERT INTO login_attempts(key,created_at) VALUES(?,?)", (key, now))
+        if not verify_password(body.current_password, user["password_hash"]):
+            raise HTTPException(400, "Текущий пароль указан неверно.")
+        encoded = hash_password(body.new_password)
+        with connect(cfg) as db, transaction(db):
+            latest = db.execute("SELECT * FROM users WHERE id=?", (user["id"],)).fetchone()
+            if not latest or latest["password_hash"] != user["password_hash"]:
+                raise HTTPException(401, "Данные аккаунта изменились. Войдите снова.")
+            db.execute("UPDATE users SET password_hash=? WHERE id=?", (encoded, user["id"]))
+            db.execute("DELETE FROM sessions WHERE user_id=?", (user["id"],))
+            db.execute("DELETE FROM login_attempts WHERE key=?", (key,))
+            audit(db, user, "password_changed", "Участник изменил собственный пароль")
+        response.delete_cookie(COOKIE, path="/", httponly=True, secure=cfg.cookie_secure, samesite="strict")
+
+    @app.get("/api/v1/recurring-payments", tags=["Регулярные платежи"], summary="Получить регулярные платежи", description="Участник получает только собственные серии, администратор — все. По умолчанию показаны действующие серии; прекращённые можно включить отдельным параметром. Ответ содержит owner_id, owner_name и can_manage.")
     def recurring_list(request: Request, include_inactive: bool = Query(default=False, title="Включить прекращённые платежи", description="true — добавить прекращённые регулярные платежи; false — показать только действующие."), user=Depends(current)):
         cfg = request.app.state.settings
         with connect(cfg) as db, transaction(db):
-            refresh(db, cfg)
-            rows = db.execute("SELECT * FROM recurring_payments" + ("" if include_inactive else " WHERE active=1") + " ORDER BY id DESC").fetchall()
-            return [recurring_json(db, row, cfg.today) for row in rows]
+            refresh(db, cfg, user=user)
+            condition, values = owner_scope(user)
+            rows = db.execute(RECURRING + " WHERE 1=1" + ("" if include_inactive else " AND r.active=1") + condition + " ORDER BY r.id DESC", values).fetchall()
+            return [recurring_json(db, row, cfg.today, user) for row in rows]
 
-    @app.post("/api/v1/recurring-payments", status_code=201, tags=["Регулярные платежи"], summary="Добавить регулярный платёж", description="Только администратор. Добавляет ручной учёт ежемесячного продления и отдельный первый период оплаты. Услуга у провайдера не заказывается и не покупается. Напоминание ставится в очередь за три дня до срока или сразу, если до срока осталось меньше трёх дней.")
-    def recurring_create(body: RecurringCreate, request: Request, user=Depends(admin)):
+    @app.post("/api/v1/recurring-payments", status_code=201, tags=["Регулярные платежи"], summary="Добавить регулярный платёж", description="Участник создаёт собственный ежемесячный расход; администратор может указать owner_id другого участника. Автор created_by фиксируется сервером и не подменяется владельцем. Добавляет первый период оплаты. Уведомление направляется только в подтверждённую общую группу за три дня до срока или позже при позднем добавлении.")
+    def recurring_create(body: RecurringCreate, request: Request, user=Depends(current)):
         cfg = request.app.state.settings
         if not 2000 <= body.next_due_date.year <= cfg.today.year + 5:
             raise HTTPException(422, "Дата оплаты должна быть от 2000 года до пяти лет вперёд.")
+        owner_id = body.owner_id if body.owner_id is not None else user["id"]
+        if user["role"] != "admin" and owner_id != user["id"]:
+            raise HTTPException(403, "Создавать платёж для другого участника может только администратор.")
         with connect(cfg) as db, transaction(db):
-            recurring_id = add_recurring(db, name=body.name, amount=body.amount, currency=body.currency, next_due_date=body.next_due_date, created_by=user["id"])
-            refresh(db, cfg)
+            if not db.execute("SELECT 1 FROM users WHERE id=?", (owner_id,)).fetchone():
+                raise HTTPException(422, "Указанный владелец платежа не найден.")
+            recurring_id = add_recurring(db, name=body.name, amount=body.amount, currency=body.currency, next_due_date=body.next_due_date, created_by=user["id"], owner_id=owner_id)
+            refresh(db, cfg, user=user)
             audit(db, user, "payment_created", "Добавлен регулярный платёж: " + body.name)
-            return recurring_json(db, db.execute("SELECT * FROM recurring_payments WHERE id=?", (recurring_id,)).fetchone(), cfg.today)
+            return recurring_json(db, recurring_row(db, recurring_id, user), cfg.today, user)
 
-    @app.patch("/api/v1/recurring-payments/{payment_id}", tags=["Регулярные платежи"], summary="Изменить условия серии со следующего месяца", description="Только администратор. Все три поля обязательны: название, сумма и валюта. Новые условия применяются к серии и её неоплаченным периодам со сроком начиная с первого числа следующего месяца в общем часовом поясе. Текущий месяц, прошлые и оплаченные будущие периоды сохраняются полностью; исходный график и идентификаторы периодов не меняются. Напоминания не сбрасываются и повторно не отправляются. Ответ содержит effective_from — дату начала новых условий. Одинаковые после нормализации значения не создают событие журнала.", responses={404: {"description": "Регулярный платёж не найден."}, 409: {"description": "Платёж прекращён, его прошлые или текущие периоды ещё не созданы либо напоминание затрагиваемого будущего периода уже отправляется. Изменения не выполнены. Для создания пропущенных периодов сначала обновите список платежей."}})
-    def recurring_update(payment_id: Annotated[int, ApiPath(title="Идентификатор регулярного платежа", description="Числовой идентификатор активной серии, условия которой нужно изменить.")], body: RecurringUpdate, request: Request, user=Depends(admin)):
+    @app.patch("/api/v1/recurring-payments/{payment_id}", tags=["Регулярные платежи"], summary="Изменить условия серии со следующего месяца", description="Владелец или администратор. Все три поля обязательны: название, сумма и валюта. Новые условия применяются к серии и её неоплаченным периодам со сроком начиная с первого числа следующего месяца. Текущий месяц, прошлые и оплаченные будущие периоды сохраняются; график, владелец, автор и идентификаторы не меняются. Напоминания не сбрасываются. Ответ содержит effective_from. Одинаковые после нормализации значения не создают событие журнала. Чужой идентификатор для обычного участника возвращает 404.", responses={404: {"description": "Регулярный платёж не найден."}, 409: {"description": "Платёж прекращён, его прошлые или текущие периоды ещё не созданы либо напоминание затрагиваемого будущего периода уже отправляется. Изменения не выполнены. Для создания пропущенных периодов сначала обновите список платежей."}})
+    def recurring_update(payment_id: Annotated[int, ApiPath(title="Идентификатор регулярного платежа", description="Числовой идентификатор активной серии, условия которой нужно изменить.")], body: RecurringUpdate, request: Request, user=Depends(current)):
         cfg = request.app.state.settings
         effective_from = (month_end(cfg.today) + timedelta(days=1)).isoformat()
         new_amount = amount_minor(body.amount)
         with connect(cfg) as db, transaction(db):
-            row = db.execute("SELECT * FROM recurring_payments WHERE id=?", (payment_id,)).fetchone()
+            row = recurring_row(db, payment_id, user)
             if not row:
                 raise HTTPException(404, "Регулярный платёж не найден.")
             if not row["active"]:
                 raise HTTPException(409, "Регулярный платёж прекращён. Его условия изменить нельзя.")
             if (row["name"], row["amount_minor"], row["currency"]) == (body.name, new_amount, body.currency):
-                return recurring_json(db, row, cfg.today) | {"effective_from": effective_from}
+                return recurring_json(db, row, cfg.today, user) | {"effective_from": effective_from}
             if row["next_materialize_date"] < effective_from:
                 raise HTTPException(409, "Сначала обновите список платежей, затем повторите изменение условий.")
             sending = db.execute("""SELECT 1 FROM reminder_outbox b
@@ -281,23 +322,26 @@ def create_app(settings: Settings | None = None):
             db.execute("""UPDATE payment_occurrences SET name=?,amount_minor=?,currency=?,updated_at=?
               WHERE recurring_payment_id=? AND is_paid=0 AND due_date>=?""", (body.name, new_amount, body.currency, utcnow(), payment_id, effective_from))
             audit(db, user, "payment_updated", "Будущие условия «" + body.name + "»: " + money(row["amount_minor"]) + " " + row["currency"] + " → " + money(new_amount) + " " + body.currency + ", с " + effective_from)
-            updated = db.execute("SELECT * FROM recurring_payments WHERE id=?", (payment_id,)).fetchone()
-            return recurring_json(db, updated, cfg.today) | {"effective_from": effective_from}
+            updated = recurring_row(db, payment_id, user)
+            return recurring_json(db, updated, cfg.today, user) | {"effective_from": effective_from}
 
-    @app.delete("/api/v1/recurring-payments/{payment_id}", status_code=204, tags=["Регулярные платежи"], summary="Прекратить регулярный платёж", description="Только администратор. Прекращает учёт новых периодов и напоминания, сохраняя ранее созданные периоды, сроки и отметки оплаты. Этот метод не выключает и не удаляет реальный сервер или услугу у провайдера.")
-    def recurring_delete(payment_id: Annotated[int, ApiPath(title="Идентификатор регулярного платежа", description="Числовой идентификатор платежа из общего списка.")], request: Request, user=Depends(admin)):
+    @app.delete("/api/v1/recurring-payments/{payment_id}", status_code=204, tags=["Регулярные платежи"], summary="Прекратить регулярный платёж", description="Владелец или администратор прекращает учёт новых периодов и напоминания, сохраняя созданные периоды, сроки и отметки оплаты. Внешняя подписка или услуга автоматически не отменяется. Чужая серия возвращает 404.")
+    def recurring_delete(payment_id: Annotated[int, ApiPath(title="Идентификатор регулярного платежа", description="Числовой идентификатор доступного платежа.")], request: Request, user=Depends(current)):
         with connect(request.app.state.settings) as db, transaction(db):
-            row = db.execute("SELECT * FROM recurring_payments WHERE id=?", (payment_id,)).fetchone()
+            row = recurring_row(db, payment_id, user)
             if not row:
                 raise HTTPException(404, "Регулярный платёж не найден.")
             db.execute("UPDATE recurring_payments SET active=0 WHERE id=?", (payment_id,))
-            db.execute("UPDATE reminder_outbox SET state='cancelled',lease_owner=NULL,lease_until=NULL WHERE state!='sent' AND occurrence_id IN(SELECT id FROM payment_occurrences WHERE recurring_payment_id=?)", (payment_id,))
+            db.execute("UPDATE reminder_outbox SET state='cancelled',last_error='payment_not_required',lease_owner=NULL,lease_until=NULL WHERE state IN ('pending','retry') AND occurrence_id IN(SELECT id FROM payment_occurrences WHERE recurring_payment_id=?)", (payment_id,))
             audit(db, user, "payment_archived", "Прекращён регулярный платёж: " + row["name"])
         return Response(status_code=204)
 
-    def occurrence_rows(db, cfg, month=None, currency=None, status=None, search=None):
-        refresh(db, cfg, month)
+    def occurrence_rows(db, cfg, user, month=None, currency=None, status=None, search=None):
+        refresh(db, cfg, month, user=user)
         conditions, args = [], []
+        if user["role"] != "admin":
+            conditions.append("r.owner_id=?")
+            args.append(user["id"])
         if month:
             conditions.append("substr(o.due_date,1,7)=?")
             args.append(month)
@@ -322,34 +366,36 @@ def create_app(settings: Settings | None = None):
         query = OCCURRENCES + (" WHERE " + " AND ".join(conditions) if conditions else "") + " ORDER BY o.due_date,o.id"
         return db.execute(query, args).fetchall()
 
-    @app.get("/api/v1/payment-occurrences", tags=["Периоды оплаты"], summary="Получить периоды оплаты", description="Возвращает отдельные периоды с суммой, валютой, сроком, отметкой и фактической датой оплаты. Просрочка пересчитывается в общем часовом поясе. История сохраняется независимо от следующего периода.")
+    @app.get("/api/v1/payment-occurrences", tags=["Периоды оплаты"], summary="Получить периоды оплаты", description="Участник получает только периоды своих серий, администратор — все. Ответ содержит владельца, сумму, валюту, срок, отметку, дату и календарную просрочку. История сохраняется независимо от следующего периода.")
     def occurrences(request: Request, month: str | None = Query(default=None, title="Месяц", description="Фильтр по месяцу срока оплаты в формате YYYY-MM. Без параметра возвращаются все созданные периоды."), currency: str | None = Query(default=None, title="Валюта", description="Фильтр по валюте: RUB — рубли, USD — доллары, EUR — евро."), status: str | None = Query(default=None, title="Статус оплаты", description="paid — оплачено, unpaid — не оплачено, overdue — просрочено, pending — срок ещё не прошёл, all — все статусы."), search: str | None = Query(default=None, max_length=160, title="Поиск по названию", description="Текст для поиска внутри названия платежа."), user=Depends(current)):
         cfg = request.app.state.settings
         with connect(cfg) as db, transaction(db):
-            return [occurrence_json(row, cfg.today) for row in occurrence_rows(db, cfg, month, currency, status, search)]
+            return [occurrence_json(row, cfg.today, user) for row in occurrence_rows(db, cfg, user, month, currency, status, search)]
 
     @app.get("/api/v1/payment-occurrences/{occurrence_id}", tags=["Периоды оплаты"], summary="Получить конкретный период оплаты", description="Возвращает данные одного периода, его фактическую дату оплаты и актуальную просрочку в календарных днях.")
     def occurrence_get(occurrence_id: Annotated[int, ApiPath(title="Идентификатор периода оплаты", description="Числовой идентификатор отдельного периода из списка оплат.")], request: Request, user=Depends(current)):
         cfg = request.app.state.settings
         with connect(cfg) as db, transaction(db):
-            refresh(db, cfg)
-            row = db.execute(OCCURRENCES + " WHERE o.id=?", (occurrence_id,)).fetchone()
+            refresh(db, cfg, user=user)
+            condition, values = owner_scope(user)
+            row = db.execute(OCCURRENCES + " WHERE o.id=?" + condition, (occurrence_id, *values)).fetchone()
             if not row:
                 raise HTTPException(404, "Период оплаты не найден.")
-            return occurrence_json(row, cfg.today)
+            return occurrence_json(row, cfg.today, user)
 
-    @app.patch("/api/v1/payment-occurrences/{occurrence_id}", tags=["Периоды оплаты"], summary="Изменить отметку или дату оплаты", description="Администратор и обычный пользователь могут вручную подтвердить или отменить отметку оплаты периода и исправить фактическую дату. Это внутренний учёт команды, а не проведение банковского платежа или подтверждение биллинга Aéza. Отмена очищает дату; исправление пересчитывает просрочку. Исходный срок и другие периоды не меняются.")
+    @app.patch("/api/v1/payment-occurrences/{occurrence_id}", tags=["Периоды оплаты"], summary="Изменить отметку или дату оплаты", description="Владелец или администратор может подтвердить или отменить отметку оплаты периода и исправить фактическую дату. Это ручной учёт, а не банковский платёж. Отмена очищает дату; исправление пересчитывает просрочку. Исходный срок и другие периоды не меняются. Чужой период возвращает 404.")
     def occurrence_patch(occurrence_id: Annotated[int, ApiPath(title="Идентификатор периода оплаты", description="Числовой идентификатор периода, отметку которого нужно изменить.")], body: OccurrencePatch, request: Request, user=Depends(current)):
         cfg = request.app.state.settings
         fields = body.model_fields_set
-        if not fields or "is_paid" in fields and body.is_paid is None:
-            raise HTTPException(422, "Укажите статус или фактическую дату оплаты.")
-        if body.paid_at and body.paid_at > cfg.today:
-            raise HTTPException(422, "Фактическая дата оплаты не может быть в будущем.")
         with connect(cfg) as db, transaction(db):
-            row = db.execute(OCCURRENCES + " WHERE o.id=?", (occurrence_id,)).fetchone()
+            condition, values = owner_scope(user)
+            row = db.execute(OCCURRENCES + " WHERE o.id=?" + condition, (occurrence_id, *values)).fetchone()
             if not row:
                 raise HTTPException(404, "Период оплаты не найден.")
+            if not fields or "is_paid" in fields and body.is_paid is None:
+                raise HTTPException(422, "Укажите статус или фактическую дату оплаты.")
+            if body.paid_at and body.paid_at > cfg.today:
+                raise HTTPException(422, "Фактическая дата оплаты не может быть в будущем.")
             paid = body.is_paid if "is_paid" in fields else bool(row["is_paid"])
             if not paid and body.paid_at is not None:
                 raise HTTPException(422, "Для неоплаченного периода дата оплаты должна быть пустой.")
@@ -357,12 +403,10 @@ def create_app(settings: Settings | None = None):
             if paid and not paid_at:
                 paid_at = cfg.today.isoformat()
             db.execute("UPDATE payment_occurrences SET is_paid=?,paid_at=?,updated_at=? WHERE id=?", (int(paid), paid_at, utcnow(), occurrence_id))
-            if not paid:
-                db.execute("UPDATE reminder_outbox SET state='pending',next_attempt_at=0 WHERE occurrence_id=? AND state='cancelled' AND EXISTS(SELECT 1 FROM recurring_payments WHERE id=? AND active=1)", (occurrence_id, row["recurring_payment_id"]))
-            schedule_reminders(db, cfg.today)
+            schedule_reminders(db, cfg.today, owner_id=user["id"] if user["role"] != "admin" else None)
             audit(db, user, "payment_paid" if paid else "payment_unpaid", ("Подтверждена оплата: " if paid else "Отменена отметка оплаты: ") + row["name"])
             updated = db.execute(OCCURRENCES + " WHERE o.id=?", (occurrence_id,)).fetchone()
-            return occurrence_json(updated, cfg.today)
+            return occurrence_json(updated, cfg.today, user)
 
     @app.get("/api/v1/payments/summary", tags=["Итоги"], summary="Получить итоги по валютам", description="Возвращает плановые, оплаченные, неоплаченные и просроченные суммы, а также количество периодов. RUB, USD и EUR считаются отдельно, без конвертации. Суммы передаются строками с двумя знаками после запятой.")
     def summary(request: Request, month: str | None = Query(default=None, title="Месяц итогов", description="Месяц срока оплаты в формате YYYY-MM. Без параметра итоги включают все созданные периоды."), user=Depends(current)):
@@ -370,7 +414,7 @@ def create_app(settings: Settings | None = None):
         sums = {c: {"planned": 0, "paid": 0, "unpaid": 0, "overdue": 0} for c in CURRENCIES}
         counts = {"total_count": 0, "paid_count": 0, "unpaid_count": 0, "overdue_count": 0}
         with connect(cfg) as db, transaction(db):
-            for row in occurrence_rows(db, cfg, month):
+            for row in occurrence_rows(db, cfg, user, month):
                 amounts = sums[row["currency"]]
                 value = row["amount_minor"]
                 amounts["planned"] += value
@@ -387,12 +431,14 @@ def create_app(settings: Settings | None = None):
         with connect(request.app.state.settings) as db:
             return [public_user(row) | {"env_managed": bool(row["env_managed"])} for row in db.execute("SELECT * FROM users ORDER BY env_managed DESC,id")]
 
-    @app.post("/api/v1/users", status_code=201, tags=["Пользователи"], summary="Создать обычного пользователя", description="Только администратор. Создаёт пользователя с правом просмотра платежей и изменения оплаты. Создание администратора через этот метод запрещено.")
+    @app.post("/api/v1/users", status_code=201, tags=["Пользователи"], summary="Создать участника с паролем", description="Только администратор. Создаёт участника, который видит и управляет своими платежами. Альтернатива — одноразовое приглашение, где пароль задаёт сам участник. Создание администратора через этот метод запрещено.")
     def user_create(body: UserCreate, request: Request, user=Depends(admin)):
         encoded = hash_password(body.password)
         try:
             with connect(request.app.state.settings) as db, transaction(db):
-                result = db.execute("INSERT INTO users(username,full_name,password_hash,role,created_at) VALUES(?,?,?,'user',?)", (body.username, body.full_name, encoded, utcnow()))
+                if db.execute("SELECT 1 FROM invitations WHERE username=? AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at>?", (body.username, int(time.time()))).fetchone():
+                    raise HTTPException(409, "Этот логин зарезервирован действующим приглашением.")
+                result = db.execute("INSERT INTO users(id,username,full_name,password_hash,role,created_at) VALUES(?,?,?,?,'user',?)", (next_user_id(db), body.username, body.full_name, encoded, utcnow()))
                 row = db.execute("SELECT * FROM users WHERE id=?", (result.lastrowid,)).fetchone()
                 audit(db, user, "user_created", "Создан пользователь: " + body.username)
                 return public_user(row)
@@ -411,6 +457,8 @@ def create_app(settings: Settings | None = None):
                     raise HTTPException(404, "Пользователь не найден.")
                 if row["env_managed"] or row["role"] == "admin":
                     raise HTTPException(403, "Учётная запись администратора управляется только через .env.")
+                if body.username and db.execute("SELECT 1 FROM invitations WHERE username=? AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at>?", (body.username, int(time.time()))).fetchone():
+                    raise HTTPException(409, "Этот логин зарезервирован действующим приглашением.")
                 db.execute("UPDATE users SET username=?,full_name=?,password_hash=? WHERE id=?", (body.username or row["username"], body.full_name or row["full_name"], encoded or row["password_hash"], user_id))
                 db.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
                 audit(db, user, "user_updated", "Изменён пользователь: " + (body.username or row["username"]))
@@ -418,7 +466,7 @@ def create_app(settings: Settings | None = None):
         except sqlite3.IntegrityError:
             raise HTTPException(409, "Пользователь с таким логином уже существует.") from None
 
-    @app.delete("/api/v1/users/{user_id}", status_code=204, tags=["Пользователи"], summary="Удалить обычного пользователя", description="Только администратор. Удаляет обычного пользователя и отзывает его сессии. История платежей сохраняется. Удалить администратора этим методом нельзя.")
+    @app.delete("/api/v1/users/{user_id}", status_code=204, tags=["Пользователи"], summary="Удалить участника", description="Только администратор. Передаёт все платежи участника администратору и удаляет учётную запись с её сессиями. Автор created_by, суммы, сроки и история сохраняются. Удалить администратора этим методом нельзя.")
     def user_delete(user_id: Annotated[int, ApiPath(title="Идентификатор пользователя", description="Числовой идентификатор удаляемого обычного пользователя.")], request: Request, user=Depends(admin)):
         with connect(request.app.state.settings) as db, transaction(db):
             row = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
@@ -426,14 +474,19 @@ def create_app(settings: Settings | None = None):
                 raise HTTPException(404, "Пользователь не найден.")
             if row["env_managed"] or row["role"] == "admin":
                 raise HTTPException(403, "Учётная запись администратора управляется только через .env.")
+            admin_id = db.execute("SELECT id FROM users WHERE env_managed=1").fetchone()["id"]
+            transferred = db.execute("UPDATE recurring_payments SET owner_id=? WHERE owner_id=?", (admin_id, user_id)).rowcount
             db.execute("DELETE FROM users WHERE id=?", (user_id,))
-            audit(db, user, "user_deleted", "Удалён пользователь: " + row["username"])
+            audit(db, user, "user_deleted", "Удалён пользователь: " + row["username"] + "; передано платежей администратору: " + str(transferred))
         return Response(status_code=204)
 
-    @app.get("/api/v1/settings", tags=["Система"], summary="Получить общие настройки", description="Возвращает название продукта, режим ручного учёта manual, общий часовой пояс, сегодняшнюю дату, срок напоминания и признак настройки Telegram. Режим manual не означает подключение к реальному биллингу Aéza. Секреты, пароль и токен бота не передаются.")
+    @app.get("/api/v1/settings", tags=["Система"], summary="Получить общие настройки", description="Название продукта, режим ручного учёта manual, часовой пояс, сегодняшняя дата и срок напоминания. telegram_configured отражает подтверждённую привязку общей группы к текущему боту. Секреты и токен не передаются.")
     def settings_get(request: Request, user=Depends(current)):
         cfg = request.app.state.settings
-        return {"timezone": cfg.timezone, "today": cfg.today.isoformat(), "telegram_configured": bool(cfg.telegram_bot_token and cfg.telegram_chat_id), "reminder_days": 3, "product_name": "Aéza · Контроль продлений", "integration_mode": "manual"}
+        from .telegram_connections import is_connected
+        with connect(cfg) as db:
+            configured = is_connected(db, cfg)
+        return {"timezone": cfg.timezone, "today": cfg.today.isoformat(), "telegram_configured": configured, "reminder_days": 3, "product_name": "Учёт регулярных платежей", "integration_mode": "manual"}
 
     @app.get("/api/v1/activity", tags=["Система"], summary="Получить журнал действий", description="Только администратор. Возвращает последние события входа, изменения платежей и управления пользователями. Пароли и токены в журнале не сохраняются.")
     def activity(request: Request, limit: int = Query(default=30, ge=1, le=100, title="Количество событий", description="Сколько последних событий вернуть: от 1 до 100, по умолчанию 30."), user=Depends(admin)):
@@ -445,6 +498,11 @@ def create_app(settings: Settings | None = None):
         with connect(request.app.state.settings) as db:
             return [dict(row) for row in db.execute("""SELECT b.id,b.occurrence_id,b.state,b.attempts,b.next_attempt_at,b.sent_at,b.last_error,o.name,o.due_date
               FROM reminder_outbox b JOIN payment_occurrences o ON o.id=b.occurrence_id ORDER BY b.id DESC LIMIT 100""")]
+
+    from .invitations import register_routes as register_invitation_routes
+    register_invitation_routes(app, current, admin)
+    from .telegram_connections import register_routes
+    register_routes(app, current, admin)
 
     frontend_dist = ROOT / "frontend" / "dist"
     if (frontend_dist / "assets").exists():
@@ -480,7 +538,7 @@ def create_app(settings: Settings | None = None):
             for method, operation in methods.items():
                 if not isinstance(operation, dict) or "operationId" not in operation:
                     continue
-                if path in {"/api/v1/auth/login", "/api/v1/health"}:
+                if path in {"/api/v1/auth/login", "/api/v1/health", "/api/v1/invitations/inspect", "/api/v1/invitations/accept"}:
                     operation["security"] = []
                 else:
                     operation["security"] = [{"sessionCookie": [], **({"csrfHeader": []} if method in {"post", "patch", "put", "delete"} else {})}]

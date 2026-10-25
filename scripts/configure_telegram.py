@@ -61,9 +61,8 @@ def configure(client, token, chat_id, profile, expected_bot, photo=None):
     bot = api_call(client, token, "getMe")
     if not isinstance(bot, dict) or str(bot.get("username", "")).casefold() != expected_bot.lstrip("@").casefold():
         raise ProfileError("unexpected_bot_no_changes_made")
-    chat = api_call(client, token, "getChat", {"chat_id": chat_id})
-    if not isinstance(chat, dict) or str(chat.get("id", "")) != chat_id:
-        raise ProfileError("unexpected_chat_no_changes_made")
+    if chat_id and not re.fullmatch(r"-?[1-9][0-9]*", chat_id):
+        raise ProfileError("invalid_legacy_chat_no_changes_made")
     public_commands = [item for item in profile["commands"] if item["command"] in {"start", "help"}]
     for language in ("", "ru"):
         for method, key in (("setMyName", "name"), ("setMyDescription", "description"),
@@ -71,11 +70,18 @@ def configure(client, token, chat_id, profile, expected_bot, photo=None):
             if api_call(client, token, method, {key: profile[key], "language_code": language}) is not True:
                 raise ProfileError("profile_update_not_confirmed")
         api_call(client, token, "setMyCommands", {"commands": public_commands, "language_code": language})
+        api_call(client, token, "setMyCommands", {"commands": public_commands, "language_code": language,
+                                                 "scope": {"type": "all_private_chats"}})
+        api_call(client, token, "setMyCommands", {"commands": public_commands, "language_code": language,
+                                                 "scope": {"type": "all_group_chats"}})
         api_call(client, token, "setMyCommands", {"commands": profile["commands"], "language_code": language,
-                                                 "scope": {"type": "chat", "chat_id": chat_id}})
+                                                 "scope": {"type": "all_chat_administrators"}})
+        # Remove the previous release's per-chat finance menu. This ID is only
+        # for command cleanup, never a notification destination or access grant.
+        if chat_id:
+            api_call(client, token, "deleteMyCommands", {"language_code": language,
+                                                       "scope": {"type": "chat", "chat_id": chat_id}})
     api_call(client, token, "setChatMenuButton", {"menu_button": {"type": "commands"}})
-    if chat.get("type") == "private":
-        api_call(client, token, "setChatMenuButton", {"chat_id": chat_id, "menu_button": {"type": "commands"}})
     if photo is not None:
         if api_call(client, token, "setMyProfilePhoto", photo=photo) is not True:
             raise ProfileError("avatar_update_not_confirmed")
@@ -85,14 +91,17 @@ def configure(client, token, chat_id, profile, expected_bot, photo=None):
             result = api_call(client, token, method, {"language_code": language})
             if not isinstance(result, dict) or result.get(key) != profile[key]:
                 raise ProfileError("profile_readback_mismatch")
-        commands = api_call(client, token, "getMyCommands", {"language_code": language,
-                            "scope": {"type": "chat", "chat_id": chat_id}})
-        if commands != profile["commands"]:
-            raise ProfileError("commands_readback_mismatch")
         if api_call(client, token, "getMyCommands", {"language_code": language}) != public_commands:
             raise ProfileError("public_commands_readback_mismatch")
-    menu = api_call(client, token, "getChatMenuButton",
-                    {"chat_id": chat_id} if chat.get("type") == "private" else {})
+        for scope, expected in (({"type": "all_private_chats"}, public_commands),
+                                ({"type": "all_group_chats"}, public_commands),
+                                ({"type": "all_chat_administrators"}, profile["commands"])):
+            if api_call(client, token, "getMyCommands", {"language_code": language,"scope": scope}) != expected:
+                raise ProfileError("commands_readback_mismatch")
+        if chat_id and api_call(client, token, "getMyCommands", {"language_code": language,
+                                    "scope": {"type": "chat", "chat_id": chat_id}}) != []:
+            raise ProfileError("legacy_commands_not_removed")
+    menu = api_call(client, token, "getChatMenuButton")
     if not isinstance(menu, dict) or menu.get("type") != "commands":
         raise ProfileError("menu_readback_mismatch")
     if photo is not None:
@@ -100,7 +109,7 @@ def configure(client, token, chat_id, profile, expected_bot, photo=None):
         if not isinstance(photos, dict) or not photos.get("photos"):
             raise ProfileError("avatar_readback_missing")
     return {"bot": bot["username"], "profile_verified": True, "commands": len(profile["commands"]),
-            "destination": chat.get("type"), "avatar_applied": photo is not None, "menu_verified": True}
+            "legacy_commands_removed": bool(chat_id), "avatar_applied": photo is not None, "menu_verified": True}
 
 
 def main(argv=None):
@@ -121,7 +130,7 @@ def main(argv=None):
         values = dotenv_values(ROOT / ".env", interpolate=False)
         token = os.getenv("TELEGRAM_BOT_TOKEN", values.get("TELEGRAM_BOT_TOKEN") or "").strip()
         chat_id = os.getenv("TELEGRAM_CHAT_ID", values.get("TELEGRAM_CHAT_ID") or "").strip()
-        if not token or not re.fullmatch(r"-?[1-9][0-9]*", chat_id):
+        if not token:
             raise ProfileError("telegram_not_configured")
         with httpx.Client(timeout=httpx.Timeout(20, connect=5), follow_redirects=False) as client:
             result = configure(client, token, chat_id, profile, args.expected_bot, photo)

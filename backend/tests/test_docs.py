@@ -25,10 +25,10 @@ def test_swagger_assets_are_local_and_schema_stays_authenticated(tmp_path):
         schema = client.get("/api/v1/openapi.json").json()
         assert schema["components"]["securitySchemes"]["csrfHeader"]["name"] == "X-CSRF-Token"
         assert schema["paths"]["/api/v1/users"]["post"]["security"] == [{"sessionCookie": [], "csrfHeader": []}]
-        assert schema["info"]["title"] == "Aéza · API контроля продлений"
-        assert "не проводит платёж" in schema["info"]["description"]
+        assert schema["info"]["title"] == "API регулярных платежей"
+        assert "не проводит банковскую операцию" in schema["info"]["description"]
         settings = client.get("/api/v1/settings").json()
-        assert settings["product_name"] == "Aéza · Контроль продлений"
+        assert settings["product_name"] == "Учёт регулярных платежей"
         assert settings["integration_mode"] == "manual"
         assert settings["reminder_days"] == 3
         assert "telegram_bot_token" not in settings and "admin_password_hash" not in settings

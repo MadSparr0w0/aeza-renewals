@@ -18,13 +18,12 @@ def test_profile_public_and_chat_scopes_and_readback():
         result = True
         if method == "getMe":
             result = {"id": 123, "username": "InKeepbot"}
-        elif method == "getChat":
-            result = {"id": 456, "type": "private"}
         elif method in {"getMyName", "getMyDescription", "getMyShortDescription"}:
             key = {"getMyName": "name", "getMyDescription": "description", "getMyShortDescription": "short_description"}[method]
             result = {key: profile[key]}
         elif method == "getMyCommands":
-            result = profile["commands"] if payload.get("scope") else public
+            scope = payload.get("scope",{}).get("type")
+            result = [] if scope == "chat" else profile["commands"] if scope == "all_chat_administrators" else public
         elif method == "getChatMenuButton":
             result = {"type": "commands"}
         elif method == "getUserProfilePhotos":
@@ -35,9 +34,12 @@ def test_profile_public_and_chat_scopes_and_readback():
         result = configure(client, "fake-test-token", "456", profile, "InKeepbot", b"\xff\xd8\xfffake")
     assert result["profile_verified"] and result["menu_verified"] and result["avatar_applied"]
     writes = [payload for method, payload in requests if method == "setMyCommands"]
-    assert len(writes) == 4
+    assert len(writes) == 8
     assert all(payload["commands"] == public for payload in writes if not payload.get("scope"))
-    assert all(payload["scope"] == {"type": "chat", "chat_id": "456"} for payload in writes if payload.get("scope"))
+    assert all(payload["commands"] == profile["commands"] for payload in writes if payload.get("scope",{}).get("type") == "all_chat_administrators")
+    deletes = [payload for method,payload in requests if method == "deleteMyCommands"]
+    assert len(deletes) == 2 and all(p["scope"] == {"type":"chat","chat_id":"456"} for p in deletes)
+    assert not any(method == "getChat" for method,_ in requests)
     assert not any(method == "sendMessage" for method, _ in requests)
 
 

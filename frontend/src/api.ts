@@ -19,6 +19,9 @@ export type Occurrence = {
   overdue_days: number;
   late_days?: number;
   recurring_active: boolean;
+  owner_id: number;
+  owner_name: string;
+  can_manage: boolean;
 };
 export type Recurring = {
   id: number;
@@ -29,6 +32,17 @@ export type Recurring = {
   frequency: string;
   active: boolean;
   effective_from?: string;
+  owner_id: number;
+  owner_name: string;
+  can_manage: boolean;
+};
+export type Invitation = {
+  id: number;
+  username: string;
+  full_name: string;
+  created_at: string;
+  expires_at: string;
+  status: "active" | "accepted" | "revoked" | "expired";
 };
 export type CurrencySummary = {
   planned: string;
@@ -88,7 +102,7 @@ export async function api<T>(
       typeof error?.detail === "string"
         ? error.detail
         : `Не удалось выполнить запрос (${response.status}).`;
-    if (response.status === 422)
+    if (response.status === 422 && typeof error?.detail !== "string")
       message =
         "Проверьте данные. Сумма должна быть положительной, а все обязательные поля — заполнены.";
     if (response.status === 401) {
@@ -99,7 +113,7 @@ export async function api<T>(
       if (path !== "/auth/login")
         window.dispatchEvent(new Event("invoice-session-expired"));
     }
-    if (response.status === 403)
+    if (response.status === 403 && typeof error?.detail !== "string")
       message = "Недостаточно прав или сессия устарела. Обновите страницу.";
     if (response.status === 429)
       message = "Слишком много попыток. Подождите и попробуйте снова.";

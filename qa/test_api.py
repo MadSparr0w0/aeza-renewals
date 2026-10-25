@@ -7,8 +7,9 @@ from fastapi.testclient import TestClient
 
 from backend.app import create_app
 from backend.config import Settings
-from backend.db import connect
+from backend.db import connect, utcnow
 from backend.security import hash_password
+from backend.telegram_connections import token_scope
 
 ADMIN_PASSWORD = 'A temporary acceptance passphrase!'
 USER_PASSWORD = 'An independent user passphrase!'
@@ -23,7 +24,8 @@ class FrozenSettings(Settings):
 @pytest.fixture
 def cfg(tmp_path):
     return FrozenSettings(database_path=tmp_path / 'acceptance.db', admin_username='administrator',
-                          admin_password_hash=hash_password(ADMIN_PASSWORD), app_secret='a' * 64)
+                          admin_password_hash=hash_password(ADMIN_PASSWORD), app_secret='a' * 64,
+                          telegram_bot_token='synthetic-acceptance-token')
 
 
 @pytest.fixture
@@ -81,8 +83,9 @@ def test_user_cannot_administer_even_with_direct_api_calls(client, cfg):
         assert ordinary.post('/api/v1/users', headers=headers, json={'username': 'attacker', 'full_name': 'No', 'password': USER_PASSWORD}).status_code == 403
         assert ordinary.patch(f'/api/v1/users/{user_id}', headers=headers, json={'full_name': 'Changed'}).status_code == 403
         assert ordinary.delete(f'/api/v1/users/{user_id}', headers=headers).status_code == 403
-        assert ordinary.delete(f'/api/v1/recurring-payments/{recurring["id"]}', headers=headers).status_code == 403
-        assert ordinary.post('/api/v1/recurring-payments', headers=headers, json={'name': 'Forbidden', 'amount': '1', 'currency': 'EUR', 'next_due_date': '2026-10-25'}).status_code == 403
+        assert ordinary.delete(f'/api/v1/recurring-payments/{recurring["id"]}', headers=headers).status_code == 404
+        assert ordinary.get('/api/v1/payment-occurrences?month=2026-10').json() == []
+        assert ordinary.post('/api/v1/recurring-payments', headers=headers, json={'name': 'Own payment', 'amount': '1', 'currency': 'EUR', 'next_due_date': '2026-10-25'}).status_code == 201
         occurrence = ordinary.get('/api/v1/payment-occurrences?month=2026-10').json()[0]
         response = ordinary.patch(f'/api/v1/payment-occurrences/{occurrence["id"]}', headers=headers,
                                   json={'is_paid': True, 'paid_at': '2026-10-21'})
@@ -131,6 +134,12 @@ def test_currency_summaries_are_exact_and_never_converted(client):
 
 def test_archive_preserves_history_and_cancels_unsent_reminders(client, cfg):
     headers = login(client)
+    with connect(cfg) as db:
+        admin_id = db.execute('SELECT id FROM users WHERE env_managed=1').fetchone()[0]
+        db.execute('''INSERT INTO telegram_connection
+          (id,chat_id,chat_title,chat_type,bot_scope,connected_at,connected_on,connected_by)
+          VALUES(1,'-1001234567890','Synthetic team','supergroup',?,?,?,?)''',
+                   (token_scope(cfg.telegram_bot_token), utcnow(), cfg.today.isoformat(), admin_id))
     recurring = payment(client, headers)
     for _ in range(3):
         client.get('/api/v1/payment-occurrences')

@@ -18,6 +18,7 @@ def main():
         paths.extend((ROOT / directory).rglob('*'))
     selected = sorted({p for p in paths if p.is_file() and '__pycache__' not in p.parts
                        and '.pytest_cache' not in p.parts and p.suffix not in {'.pyc', '.pyo'}
+                       and (not p.is_relative_to(ROOT / 'qa/screenshots') or p.name.startswith('team-'))
                        and not p.name.endswith('.tsbuildinfo')})
     required = (ROOT / 'frontend/dist/index.html', ROOT / 'openapi.json', ROOT / 'frontend/package-lock.json')
     if any(path not in selected for path in required):

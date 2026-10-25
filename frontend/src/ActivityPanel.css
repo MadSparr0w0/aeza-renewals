@@ -1,7 +1,8 @@
 .activity-panel {
-  --activity-accent: var(--accent);
-  --activity-border: var(--line, #2b2b2e);
+  --activity-accent: #e97c35;
+  --activity-border: var(--line, #373737);
   color: var(--text, #f4f4f4);
+  font-family: var(--font-body);
   display: grid;
   gap: 18px;
   min-width: 0;
@@ -18,7 +19,7 @@
   padding: 5px;
   border: 1px solid var(--activity-border);
   border-radius: 14px;
-  background: #151515;
+  background: #191919;
 }
 .activity-panel__tabs button {
   display: inline-flex;
@@ -29,7 +30,7 @@
   padding: 0 19px;
   border-radius: 10px;
   background: transparent;
-  color: #a4a4ad;
+  color: var(--muted, #a4a4a4);
   font-size: 13px;
   font-weight: 700;
   transition:
@@ -37,11 +38,11 @@
     color 0.15s;
 }
 .activity-panel__tabs button[aria-selected="true"] {
-  background: #3e2c20;
-  color: #f4f4f4;
+  background: #303030;
+  color: var(--text, #f4f4f4);
 }
 .activity-panel__tabs button[aria-selected="true"] svg {
-  color: var(--activity-accent);
+  color: currentColor;
 }
 .activity-panel__button {
   display: inline-flex;
@@ -53,15 +54,15 @@
   padding: 10px 17px;
   border: 1px solid var(--activity-border);
   border-radius: 10px;
-  background: var(--surface);
+  background: #252525;
   font: inherit;
   font-size: 13px;
   font-weight: 700;
-  color: #d8d8df;
+  color: var(--text, #f4f4f4);
 }
 .activity-panel__button:hover:not(:disabled) {
-  border-color: #8a6e5c;
-  background: #26262a;
+  border-color: #616161;
+  background: #303030;
 }
 .activity-panel__button:focus-visible,
 .activity-panel__tabs button:focus-visible {
@@ -71,7 +72,7 @@
 .activity-panel__scope {
   margin: -3px 0 0;
   max-width: 900px;
-  color: var(--muted, #a4a4ad);
+  color: var(--muted, #a4a4a4);
   font-size: 12px;
   line-height: 1.7;
 }
@@ -95,7 +96,7 @@
   border-right: 0;
 }
 .activity-panel__metrics dt {
-  color: var(--muted, #a4a4ad);
+  color: var(--muted, #a4a4a4);
   font-size: 12px;
   line-height: 1.6;
 }
@@ -105,12 +106,12 @@
   font-size: 21px;
   line-height: 1.25;
   letter-spacing: -0.7px;
-  color: #f4f4f4;
+  color: var(--text, #f4f4f4);
 }
 .activity-panel__card {
   min-width: 0;
   overflow: hidden;
-  background: var(--surface);
+  background: var(--surface, #1f1f1f);
   border: 1px solid var(--activity-border);
   border-radius: 18px;
 }
@@ -127,7 +128,7 @@
   gap: 7px;
   min-width: 195px;
   font-size: 12px;
-  color: #a6a6b1;
+  color: var(--muted, #a4a4a4);
 }
 .activity-panel__filter-label select {
   width: 100%;
@@ -135,8 +136,8 @@
   padding: 8px 33px 8px 12px;
   border: 1px solid var(--activity-border);
   border-radius: 9px;
-  background-color: #1b1b1e;
-  color: #e0e0e7;
+  background-color: #252525;
+  color: var(--text, #f4f4f4);
   font: inherit;
   font-size: 13px;
 }
@@ -147,7 +148,7 @@
   flex: 1;
   min-width: 220px;
   max-width: 420px;
-  color: #9a9aa6;
+  color: var(--muted, #a4a4a4);
 }
 .activity-panel__search > svg {
   position: absolute;
@@ -161,17 +162,17 @@
   padding: 10px 13px 10px 40px;
   border: 1px solid var(--activity-border);
   border-radius: 9px;
-  background: #1b1b1e;
-  color: #e0e0e7;
+  background: #252525;
+  color: var(--text, #f4f4f4);
   font: inherit;
   font-size: 13px;
 }
 .activity-panel__search input::placeholder {
-  color: #8a8a96;
+  color: var(--muted, #a4a4a4);
 }
 .activity-panel__results {
   padding: 15px 24px 9px;
-  color: #a0a0ad;
+  color: var(--muted, #a4a4a4);
   font-size: 12px;
 }
 .activity-panel__table {
@@ -182,8 +183,8 @@
 }
 .activity-panel__table th {
   padding: 13px 16px;
-  background: #1b1b1e;
-  color: #a5a5af;
+  background: #252525;
+  color: var(--muted, #a4a4a4);
   font-size: 12px;
   font-weight: 700;
   line-height: 1.5;
@@ -192,7 +193,7 @@
 }
 .activity-panel__table td {
   padding: 20px 16px;
-  border-bottom: 1px solid #2b2b2e;
+  border-bottom: 1px solid var(--activity-border);
   vertical-align: top;
   font-size: 12px;
   line-height: 1.7;
@@ -213,10 +214,10 @@
 .activity-panel__table strong {
   font-size: 12px;
   font-weight: 700;
-  color: #e5e5ec;
+  color: var(--text, #f4f4f4);
 }
 .activity-panel__table time {
-  color: #a9a9b4;
+  color: var(--muted, #a4a4a4);
   font-family: var(--font-numeric, monospace);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
@@ -258,8 +259,8 @@
   max-width: 100%;
   padding: 5px 9px;
   border-radius: 7px;
-  background: #2c2c31;
-  color: #bdbdc8;
+  background: #303030;
+  color: var(--text, #f4f4f4);
   font-size: 12px;
   font-weight: 700;
   line-height: 1.5;
@@ -273,28 +274,17 @@
   border-radius: 50%;
   background: currentColor;
 }
-.activity-panel__state--sent {
-  background: #3c2617;
-  color: #f0b58e;
-}
-.activity-panel__state--sending {
-  background: #3c2617;
-  color: #f0b58e;
-}
 .activity-panel__state--unknown {
-  background: #3c2b20;
-  color: #f4f4f4;
-}
-.activity-panel__state--unknown::before {
-  background: var(--activity-accent);
+  outline: 1px solid #707070;
+  outline-offset: -1px;
 }
 .activity-panel__state--cancelled {
-  background: #25252a;
-  color: #a4a4af;
+  background: #282828;
+  color: var(--muted, #a4a4a4);
 }
 .activity-panel__detail {
   margin: 8px 0 0;
-  color: #a5a5b1;
+  color: var(--muted, #a4a4a4);
   font-size: 12px;
   line-height: 1.7;
 }
@@ -302,7 +292,7 @@
   font-family: var(--font-numeric, monospace);
 }
 .activity-panel__muted {
-  color: #9393a0;
+  color: var(--muted, #a4a4a4);
 }
 .activity-panel__footer {
   display: flex;
@@ -313,15 +303,15 @@
   border-top: 1px solid var(--activity-border);
 }
 .activity-panel__footer > span {
-  color: #a4a4af;
+  color: var(--muted, #a4a4a4);
   font-size: 12px;
 }
 .activity-panel__updated {
   margin: 0;
   padding: 13px 24px;
-  background: #18181b;
-  border-top: 1px solid #2b2b2e;
-  color: #9999a6;
+  background: #1b1b1b;
+  border-top: 1px solid var(--activity-border);
+  color: var(--muted, #a4a4a4);
   font-size: 12px;
 }
 .activity-panel__empty {
@@ -332,18 +322,18 @@
   min-height: 245px;
   padding: 36px 24px;
   text-align: center;
-  color: #9999a6;
+  color: var(--muted, #a4a4a4);
 }
 .activity-panel__empty > svg {
   margin-bottom: 15px;
-  color: #cc9571;
+  color: var(--muted, #a4a4a4);
 }
 .activity-panel__empty h3 {
   margin: 0;
   font-family: var(--font-heading, inherit);
   font-size: 20px;
   font-weight: 650;
-  color: #e1e1e9;
+  color: var(--text, #f4f4f4);
 }
 .activity-panel__empty p {
   max-width: 450px;
@@ -360,11 +350,12 @@
   gap: 13px;
   padding: 21px 24px;
   border-bottom: 1px solid var(--activity-border);
-  background: #2d211a;
-  color: #edb38b;
+  background: #242424;
+  color: var(--text, #f4f4f4);
 }
 .activity-panel__error > svg {
   margin-top: 2px;
+  color: var(--activity-accent);
 }
 .activity-panel__error > div {
   flex: 1;
@@ -487,12 +478,12 @@
     font-size: 16px;
     line-height: 1.5;
     font-weight: 650;
-    color: #e0e0e8;
+    color: var(--text, #f4f4f4);
     overflow-wrap: anywhere;
   }
   .activity-panel__mobile article > p {
     margin: 10px 0 0;
-    color: #a6a6b2;
+    color: var(--muted, #a4a4a4);
     font-size: 12px;
     line-height: 1.8;
     overflow-wrap: anywhere;
@@ -502,7 +493,7 @@
     gap: 10px;
     margin: 17px 0 0;
     padding-top: 14px;
-    border-top: 1px solid #2b2b2e;
+    border-top: 1px solid var(--activity-border);
   }
   .activity-panel__mobile dl > div {
     display: grid;
@@ -510,14 +501,14 @@
     gap: 13px;
   }
   .activity-panel__mobile dt {
-    color: #9999a6;
+    color: var(--muted, #a4a4a4);
     font-size: 12px;
     line-height: 1.7;
   }
   .activity-panel__mobile dd {
     min-width: 0;
     margin: 0;
-    color: #c8c8d2;
+    color: var(--text, #f4f4f4);
     font-size: 12px;
     line-height: 1.7;
     overflow-wrap: anywhere;
@@ -600,28 +591,15 @@
   }
 }
 
-.activity-panel {
-  font-family: var(--font-body);
-}
 .activity-panel__tabs button,
 .activity-panel__button,
 .activity-panel__filter-label,
 .activity-panel__table th {
   font-family: var(--font-ui);
 }
-.activity-panel__tabs button[aria-selected="true"] {
-  background: #3b2618;
-  color: #f7cfb4;
-}
-.activity-panel__card {
-  background: var(--surface);
-}
-.activity-panel__filter-label select {
-  background: #1b1b1e;
-}
 .activity-panel__mobile > li {
-  background: #1b1b1e;
+  background: #252525;
 }
 .activity-panel__table tbody > tr:hover {
-  background: #1b1b1e;
+  background: #252525;
 }

@@ -1,5 +1,5 @@
 import calendar
-from datetime import date, timedelta
+from datetime import date
 from decimal import Decimal, InvalidOperation
 
 from .db import utcnow
@@ -33,19 +33,23 @@ def money(minor: int) -> str:
     return f"{minor // 100}.{minor % 100:02d}"
 
 
-def add_recurring(db, *, name, amount, currency, next_due_date, created_by=None):
+def add_recurring(db, *, name, amount, currency, next_due_date, created_by=None, owner_id=None):
     due = date.fromisoformat(str(next_due_date))
-    cursor = db.execute("INSERT INTO recurring_payments(name,amount_minor,currency,initial_due_date,next_materialize_date,anchor_day,created_at,created_by) VALUES(?,?,?,?,?,?,?,?)",
-                        (name, amount_minor(amount), currency, due.isoformat(), next_month(due, due.day).isoformat(), due.day, utcnow(), created_by))
+    if owner_id is None:
+        creator = db.execute("SELECT id FROM users WHERE id=?", (created_by,)).fetchone()
+        owner_id = creator["id"] if creator else db.execute("SELECT id FROM users WHERE env_managed=1").fetchone()["id"]
+    cursor = db.execute("INSERT INTO recurring_payments(name,amount_minor,currency,initial_due_date,next_materialize_date,anchor_day,created_at,created_by,owner_id) VALUES(?,?,?,?,?,?,?,?,?)",
+                        (name, amount_minor(amount), currency, due.isoformat(), next_month(due, due.day).isoformat(), due.day, utcnow(), created_by, owner_id))
     recurring_id = cursor.lastrowid
     db.execute("INSERT INTO payment_occurrences(recurring_payment_id,name,amount_minor,currency,due_date,updated_at) VALUES(?,?,?,?,?,?)",
                (recurring_id, name, amount_minor(amount), currency, due.isoformat(), utcnow()))
     return recurring_id
 
 
-def materialize(db, today: date, horizon: date | None = None):
+def materialize(db, today: date, horizon: date | None = None, owner_id=None):
     horizon = max(horizon or today, month_end(next_month(today, today.day)))
-    for row in db.execute("SELECT * FROM recurring_payments WHERE active=1").fetchall():
+    query = "SELECT * FROM recurring_payments WHERE active=1" + (" AND owner_id=?" if owner_id is not None else "")
+    for row in db.execute(query, (owner_id,) if owner_id is not None else ()).fetchall():
         due = date.fromisoformat(row["next_materialize_date"])
         while due <= horizon:
             db.execute("INSERT OR IGNORE INTO payment_occurrences(recurring_payment_id,name,amount_minor,currency,due_date,updated_at) VALUES(?,?,?,?,?,?)",
@@ -54,24 +58,23 @@ def materialize(db, today: date, horizon: date | None = None):
         db.execute("UPDATE recurring_payments SET next_materialize_date=? WHERE id=?", (due.isoformat(), row["id"]))
 
 
-def occurrence_json(row, today):
+def occurrence_json(row, today, viewer=None):
     due = date.fromisoformat(row["due_date"])
     paid = bool(row["is_paid"])
     until = date.fromisoformat(row["paid_at"]) if paid else today
     late = max(0, (until - due).days)
-    return {"id": row["id"], "recurring_payment_id": row["recurring_payment_id"],
+    result = {"id": row["id"], "recurring_payment_id": row["recurring_payment_id"],
             "name": row["name"], "amount": money(row["amount_minor"]), "currency": row["currency"],
             "due_date": row["due_date"], "is_paid": paid, "paid_at": row["paid_at"],
             "status": "paid" if paid else ("overdue" if due < today else "pending"),
             "overdue_days": late, "late_days": late,
             "recurring_active": bool(row["recurring_active"]) if "recurring_active" in row.keys() else True}
+    if "owner_id" in row.keys():
+        result.update(owner_id=row["owner_id"], owner_name=row["owner_name"],
+                      can_manage=bool(viewer and (viewer["role"] == "admin" or viewer["id"] == row["owner_id"])))
+    return result
 
 
-def schedule_reminders(db, today):
-    cutoff = (today + timedelta(days=3)).isoformat()
-    db.execute("""INSERT OR IGNORE INTO reminder_outbox(occurrence_id,state,created_at)
-      SELECT o.id,'pending',? FROM payment_occurrences o JOIN recurring_payments r ON r.id=o.recurring_payment_id
-      WHERE o.is_paid=0 AND r.active=1 AND o.due_date<=?""", (utcnow(), cutoff))
-    db.execute("""UPDATE reminder_outbox SET state='cancelled',lease_owner=NULL,lease_until=NULL
-      WHERE state IN ('pending','retry') AND occurrence_id IN
-      (SELECT o.id FROM payment_occurrences o JOIN recurring_payments r ON r.id=o.recurring_payment_id WHERE o.is_paid=1 OR r.active=0)""")
+def schedule_reminders(db, today, owner_id=None):
+    from .telegram_connections import schedule_group_reminders
+    return schedule_group_reminders(db, today, owner_id=owner_id)

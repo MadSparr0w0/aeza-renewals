@@ -51,17 +51,33 @@ const actionNames: Record<
 > = {
   login: { label: "Вход в систему", category: "access" },
   logout: { label: "Выход из системы", category: "access" },
-  payment_created: { label: "Услуга добавлена в учёт", category: "payments" },
-  payment_updated: {
-    label: "Условия продления изменены",
+  payment_created: {
+    label: "Регулярный платёж добавлен",
     category: "payments",
   },
-  payment_archived: { label: "Учёт услуги прекращён", category: "payments" },
+  payment_updated: {
+    label: "Условия платежа изменены",
+    category: "payments",
+  },
+  payment_archived: {
+    label: "Регулярный платёж прекращён",
+    category: "payments",
+  },
   payment_paid: { label: "Оплата подтверждена", category: "payments" },
   payment_unpaid: { label: "Отметка об оплате отменена", category: "payments" },
   user_created: { label: "Создан пользователь", category: "users" },
   user_updated: { label: "Пользователь изменён", category: "users" },
   user_deleted: { label: "Пользователь удалён", category: "users" },
+  invitation_created: { label: "Создано приглашение", category: "users" },
+  invitation_revoked: { label: "Приглашение отозвано", category: "users" },
+  invitation_accepted: { label: "Приглашение принято", category: "users" },
+  password_changed: { label: "Пароль изменён", category: "access" },
+  telegram_link_requested: {
+    label: "Создан код подключения чата",
+    category: "access",
+  },
+  telegram_connected: { label: "Чат Telegram подключён", category: "access" },
+  telegram_disconnected: { label: "Чат Telegram отключён", category: "access" },
   demo_seeded: {
     label: "Загружены демонстрационные данные",
     category: "other",
@@ -138,7 +154,7 @@ function reminderDetail(row: ReminderRecord): string {
     return "Требует проверки в Telegram, автоматический повтор отключён.";
   if (row.state === "sent") return "Telegram подтвердил отправку сообщения.";
   if (row.state === "cancelled")
-    return "Напоминание отменено: период оплачен или учёт услуги прекращён.";
+    return "Напоминание отменено: период оплачен или регулярный платёж прекращён.";
   if (row.last_error)
     return Object.hasOwn(reminderErrors, row.last_error)
       ? reminderErrors[row.last_error]
@@ -294,7 +310,7 @@ export default function ActivityPanel({ timezone }: { timezone: string }) {
       ? [
           ["Загружено записей", activities.length],
           [
-            "Продления",
+            "Платежи",
             activities.filter(
               (row) => actionInfo(row.action).category === "payments",
             ).length,
@@ -462,7 +478,7 @@ export default function ActivityPanel({ timezone }: { timezone: string }) {
                       }}
                     >
                       <option value="all">Все действия</option>
-                      <option value="payments">Продления</option>
+                      <option value="payments">Платежи</option>
                       <option value="users">Пользователи</option>
                       <option value="access">Вход и выход</option>
                     </select>
@@ -491,7 +507,7 @@ export default function ActivityPanel({ timezone }: { timezone: string }) {
                   <span className="activity-panel__sr">
                     {tab === "activity"
                       ? "Поиск по имени, действию или описанию"
-                      : "Поиск по услуге или состоянию напоминания"}
+                      : "Поиск по платежу или состоянию напоминания"}
                   </span>
                   <Search size={17} aria-hidden="true" />
                   <input
@@ -501,8 +517,8 @@ export default function ActivityPanel({ timezone }: { timezone: string }) {
                     value={queries[tab]}
                     placeholder={
                       tab === "activity"
-                        ? "Имя, услуга или действие"
-                        : "Название услуги или состояние"
+                        ? "Имя, платёж или действие"
+                        : "Название платежа или состояние"
                     }
                     onChange={(event) => {
                       setQueries((previous) => ({
@@ -569,7 +585,7 @@ export default function ActivityPanel({ timezone }: { timezone: string }) {
                     {sourceCount
                       ? "Измените запрос или сбросьте фильтры."
                       : tab === "activity"
-                        ? "Здесь появятся входы в модуль и изменения услуг и пользователей."
+                        ? "Здесь появятся входы в модуль и изменения платежей и пользователей."
                         : "Задания появляются за три дня до срока неоплаченного периода."}
                   </p>
                   {sourceCount > 0 && (
@@ -668,13 +684,13 @@ export default function ActivityPanel({ timezone }: { timezone: string }) {
                         <div className="activity-panel__desktop">
                           <table className="activity-panel__table activity-panel__table--reminders">
                             <caption className="activity-panel__sr">
-                              Доставка напоминаний: услуга, срок, состояние,
+                              Доставка напоминаний: платёж, срок, состояние,
                               отправка и число попыток
                             </caption>
                             <thead>
                               <tr>
-                                <th scope="col">Услуга</th>
-                                <th scope="col">Срок продления</th>
+                                <th scope="col">Платёж</th>
+                                <th scope="col">Срок оплаты</th>
                                 <th scope="col">Состояние</th>
                                 <th scope="col">Отправлено</th>
                                 <th scope="col">Попытки</th>
@@ -729,7 +745,7 @@ export default function ActivityPanel({ timezone }: { timezone: string }) {
                                 </p>
                                 <dl>
                                   <div>
-                                    <dt>Срок продления</dt>
+                                    <dt>Срок оплаты</dt>
                                     <dd>
                                       <time dateTime={row.due_date}>
                                         {dueDate(row.due_date)}

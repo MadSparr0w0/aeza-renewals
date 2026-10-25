@@ -19,10 +19,17 @@ import {
   Modal,
   money,
   moveMonth,
+  Status,
   symbols,
 } from "./ui";
 
-export function Login({ onLogin }: { onLogin: (s: Session) => void }) {
+export function Login({
+  onLogin,
+  notice,
+}: {
+  onLogin: (s: Session) => void;
+  notice?: string;
+}) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -56,12 +63,13 @@ export function Login({ onLogin }: { onLogin: (s: Session) => void }) {
         <Logo />
         <div className="story-content">
           <h1>
-            Услуги
-            <br />и продления
+            Регулярные
+            <br />
+            платежи
           </h1>
           <p>
-            Стоимость услуг, сроки продления
-            <br />и история оплат в одном модуле.
+            Сроки, напоминания
+            <br />и история оплат.
           </p>
           <div className="login-brand-note">
             <span>RUB · USD · EUR</span>
@@ -79,8 +87,13 @@ export function Login({ onLogin }: { onLogin: (s: Session) => void }) {
           <Logo />
         </div>
         <div className="login-form-wrap">
-          <h2>Вход в модуль</h2>
-          <p className="login-intro">Учётная запись модуля продлений.</p>
+          <h2>Вход</h2>
+          <p className="login-intro">Войдите в свою учётную запись.</p>
+          {notice && (
+            <div className="form-notice" role="status">
+              {notice}
+            </div>
+          )}
           <form onSubmit={submit}>
             <label>
               Логин
@@ -89,7 +102,7 @@ export function Login({ onLogin }: { onLogin: (s: Session) => void }) {
                 autoComplete="username"
                 required
                 maxLength={64}
-                placeholder="Логин модуля"
+                placeholder="Логин"
                 autoFocus
               />
             </label>
@@ -100,7 +113,7 @@ export function Login({ onLogin }: { onLogin: (s: Session) => void }) {
                 type="password"
                 autoComplete="current-password"
                 required
-                placeholder="Пароль модуля"
+                placeholder="Пароль"
               />
             </label>
             {error && (
@@ -120,18 +133,7 @@ export function Login({ onLogin }: { onLogin: (s: Session) => void }) {
           </form>
           <div className="login-help">
             <CircleHelp size={17} />
-            <p>
-              Для входа используйте учётную запись приложения. Личный кабинет
-              Aéza —{" "}
-              <a
-                href="https://my.aeza.ru"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                my.aeza.ru
-              </a>
-              .
-            </p>
+            <p>Используйте учётную запись приложения.</p>
           </div>
         </div>
       </section>
@@ -141,11 +143,15 @@ export function Login({ onLogin }: { onLogin: (s: Session) => void }) {
 export function AddPayment({
   today,
   initialName = "",
+  owners,
+  defaultOwnerId,
   onClose,
   onSuccess,
 }: {
   today: string;
   initialName?: string;
+  owners?: User[];
+  defaultOwnerId?: number;
   onClose: () => void;
   onSuccess: () => void;
 }) {
@@ -165,6 +171,7 @@ export function AddPayment({
           currency: data.get("currency"),
           next_due_date: data.get("next_due_date"),
           frequency: "monthly",
+          ...(owners ? { owner_id: Number(data.get("owner_id")) } : {}),
         }),
       });
       onSuccess();
@@ -176,25 +183,37 @@ export function AddPayment({
   }
   return (
     <Modal
-      title="Добавить услугу"
-      subtitle="Запись для учёта стоимости и сроков продления уже заказанной услуги Aéza."
+      title="Добавить платёж"
+      subtitle="Укажите сумму и ближайший срок оплаты."
       onClose={onClose}
     >
       <form onSubmit={submit}>
+        {owners && (
+          <label>
+            Ответственный
+            <select name="owner_id" defaultValue={defaultOwnerId} required>
+              {owners.map((owner) => (
+                <option key={owner.id} value={owner.id}>
+                  {owner.full_name || owner.username}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <label>
-          Название услуги
+          Название платежа
           <input
             name="name"
             required
             maxLength={160}
             defaultValue={initialName}
-            placeholder="Например, VPS для проекта"
+            placeholder="Например, аренда офиса"
             autoFocus
           />
         </label>
         <div className="form-row amount-row">
           <label>
-            Стоимость продления
+            Сумма
             <input
               name="amount"
               type="number"
@@ -219,7 +238,7 @@ export function AddPayment({
         </div>
         <div className="form-row">
           <label>
-            Ближайшее продление
+            Ближайшая оплата
             <input
               name="next_due_date"
               type="date"
@@ -254,7 +273,7 @@ export function AddPayment({
             ) : (
               <Plus size={17} />
             )}{" "}
-            Добавить услугу
+            Добавить платёж
           </button>
         </div>
       </form>
@@ -264,7 +283,7 @@ export function AddPayment({
 export function PaymentModal({
   item,
   today,
-  isAdmin,
+  canManage,
   onClose,
   onSuccess,
   onDelete,
@@ -272,7 +291,7 @@ export function PaymentModal({
 }: {
   item: Occurrence;
   today: string;
-  isAdmin: boolean;
+  canManage: boolean;
   onClose: () => void;
   onSuccess: () => void;
   onDelete: () => void;
@@ -305,82 +324,88 @@ export function PaymentModal({
   }
   return (
     <Modal title={item.name} onClose={onClose}>
+      {item.owner_name && (
+        <p className="payment-detail-owner">Ответственный: {item.owner_name}</p>
+      )}
       <div className="payment-detail-summary">
         <div>
-          <span>СТОИМОСТЬ ПРОДЛЕНИЯ</span>
+          <span>СУММА</span>
           <strong>{money(item.amount, item.currency)}</strong>
         </div>
         <div>
-          <span>СРОК ПРОДЛЕНИЯ</span>
+          <span>СРОК ОПЛАТЫ</span>
           <strong>{dateLabel(item.due_date, true)}</strong>
         </div>
       </div>
-      <form onSubmit={submit}>
-        <div className="payment-status-control">
-          <button
-            type="button"
-            className={!isPaid ? "selected" : ""}
-            onClick={() => setIsPaid(false)}
-          >
-            <Clock3 size={17} /> Не оплачено
-          </button>
-          <button
-            type="button"
-            className={isPaid ? "selected paid" : ""}
-            onClick={() => setIsPaid(true)}
-          >
-            <CheckCircle2 size={17} /> Оплачено
-          </button>
-        </div>
-        {isPaid ? (
-          <label>
-            Фактическая дата оплаты
-            <input
-              type="date"
-              name="paid_at"
-              required
-              max={today}
-              value={paidAt}
-              onChange={(e) => setPaidAt(e.target.value)}
-            />
-            <small className="field-help">
-              Можно исправить дату: просрочка пересчитается автоматически.
-            </small>
-          </label>
-        ) : (
-          <div className="form-note">
-            <Clock3 size={18} />
-            <p>
-              Фактическая дата оплаты будет очищена. Срок продления и история
-              остальных оплат сохранятся.
-            </p>
+      {!canManage && <Status item={item} />}
+      {canManage && (
+        <form onSubmit={submit}>
+          <div className="payment-status-control">
+            <button
+              type="button"
+              className={!isPaid ? "selected" : ""}
+              onClick={() => setIsPaid(false)}
+            >
+              <Clock3 size={17} /> Не оплачено
+            </button>
+            <button
+              type="button"
+              className={isPaid ? "selected paid" : ""}
+              onClick={() => setIsPaid(true)}
+            >
+              <CheckCircle2 size={17} /> Оплачено
+            </button>
           </div>
-        )}
-        {error && (
-          <div className="form-error" role="alert">
-            {error}
+          {isPaid ? (
+            <label>
+              Фактическая дата оплаты
+              <input
+                type="date"
+                name="paid_at"
+                required
+                max={today}
+                value={paidAt}
+                onChange={(e) => setPaidAt(e.target.value)}
+              />
+              <small className="field-help">
+                Можно исправить дату: просрочка пересчитается автоматически.
+              </small>
+            </label>
+          ) : (
+            <div className="form-note">
+              <Clock3 size={18} />
+              <p>
+                Фактическая дата оплаты будет очищена. Срок оплаты и история
+                остальных оплат сохранятся.
+              </p>
+            </div>
+          )}
+          {error && (
+            <div className="form-error" role="alert">
+              {error}
+            </div>
+          )}
+          <div className="modal-actions">
+            <button
+              type="button"
+              className="button secondary"
+              onClick={onClose}
+              disabled={busy}
+            >
+              Отмена
+            </button>
+            <button className="button primary" disabled={busy}>
+              {busy ? (
+                <LoaderCircle className="spin" size={17} />
+              ) : (
+                <Check size={17} />
+              )}{" "}
+              Сохранить
+            </button>
           </div>
-        )}
-        <div className="modal-actions">
-          <button
-            type="button"
-            className="button secondary"
-            onClick={onClose}
-            disabled={busy}
-          >
-            Отмена
-          </button>
-          <button className="button primary" disabled={busy}>
-            {busy ? (
-              <LoaderCircle className="spin" size={17} />
-            ) : (
-              <Check size={17} />
-            )}{" "}
-            Сохранить
-          </button>
-        </div>
-      </form>
-      {isAdmin && item.recurring_active && (
+        </form>
+      )}
+      {canManage && item.recurring_active && (
         <div className="modal-danger-zone">
           {onEditSeries && (
             <button
@@ -388,13 +413,13 @@ export function PaymentModal({
               className="text-button edit-series-button"
               onClick={onEditSeries}
             >
-              <Clock3 size={15} /> Изменить будущие продления
+              <Clock3 size={15} /> Изменить будущие платежи
             </button>
           )}
           <button className="text-button danger" onClick={onDelete}>
             <Trash2 size={15} /> Прекратить учёт
           </button>
-          <p>Останавливает учёт продлений и напоминания в этом модуле.</p>
+          <p>Будущие периоды и напоминания будут остановлены.</p>
         </div>
       )}
     </Modal>
@@ -436,7 +461,7 @@ export function EditRecurringModal({
       setError(
         error instanceof Error
           ? error.message
-          : "Не удалось обновить условия продлений.",
+          : "Не удалось обновить условия платежа.",
       );
     } finally {
       setBusy(false);
@@ -444,13 +469,13 @@ export function EditRecurringModal({
   }
   return (
     <Modal
-      title="Условия будущих продлений"
-      subtitle={`Новые условия — с ${dateLabel(nextPeriod, true)}; текущий месяц и уже оплаченные продления не изменятся.`}
+      title="Условия будущих платежей"
+      subtitle={`Новые условия — с ${dateLabel(nextPeriod, true)}; текущий месяц и уже оплаченные периоды не изменятся.`}
       onClose={onClose}
     >
       <form onSubmit={submit}>
         <label>
-          Название услуги
+          Название платежа
           <input
             name="name"
             required
@@ -461,7 +486,7 @@ export function EditRecurringModal({
         </label>
         <div className="form-row amount-row">
           <label>
-            Стоимость продления
+            Сумма
             <input
               name="amount"
               type="number"
@@ -487,8 +512,8 @@ export function EditRecurringModal({
         <div className="form-note">
           <Clock3 size={18} />
           <p>
-            Изменения применяются к будущим неоплаченным продлениям. Число
-            продления и ежемесячный график сохраняются.
+            Изменения применяются к будущим неоплаченным периодам. День оплаты и
+            ежемесячный график сохраняются.
           </p>
         </div>
         {error && (
@@ -555,8 +580,8 @@ export function UserModal({
   }
   return (
     <Modal
-      title={isNew ? "Добавить пользователя" : "Изменить пользователя"}
-      subtitle="Учётная запись модуля: просмотр услуг и подтверждение оплаты продлений."
+      title={isNew ? "Создать аккаунт" : "Изменить пользователя"}
+      subtitle="Учётная запись участника команды."
       onClose={onClose}
     >
       <form onSubmit={submit}>
@@ -580,8 +605,8 @@ export function UserModal({
             required
             minLength={3}
             maxLength={64}
-            pattern="[a-zA-Z0-9_.@-]+"
-            title="Латинские буквы, цифры, точка, дефис и подчёркивание"
+            pattern={"[a-zA-Z0-9_.@\\-]+"}
+            title="Латинские буквы, цифры, точка, дефис, подчёркивание или @"
             defaultValue={isNew ? "" : user.username}
             placeholder="Например, anna"
           />
@@ -625,7 +650,7 @@ export function UserModal({
             ) : (
               <Check size={17} />
             )}{" "}
-            {isNew ? "Добавить пользователя" : "Сохранить"}
+            {isNew ? "Создать аккаунт" : "Сохранить"}
           </button>
         </div>
       </form>

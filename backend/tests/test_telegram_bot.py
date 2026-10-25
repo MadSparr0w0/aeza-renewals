@@ -1,4 +1,4 @@
-"""Telegram menu acceptance tests. Synthetic DBs and mocked transport only."""
+"""Corporate group setup and durable polling; mocks and synthetic SQLite only."""
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import date
@@ -12,8 +12,8 @@ import pytest
 
 from backend.config import Settings
 from backend.db import connect, initialize, transaction
-from backend.domain import add_recurring
 from backend import telegram_bot as bot
+from backend.telegram_connections import active_connection, start_link
 
 
 class FrozenSettings(Settings):
@@ -44,21 +44,16 @@ def db(settings):
         yield connection
 
 
-def payment(db, name="Аренда", amount="100.00", currency="RUB", due="2026-10-24", paid=False):
-    with transaction(db):
-        identifier = add_recurring(db, name=name, amount=amount, currency=currency, next_due_date=due)
-        if paid:
-            db.execute("UPDATE payment_occurrences SET is_paid=1,paid_at='2026-10-24' WHERE recurring_payment_id=?", (identifier,))
-    return identifier
-
-
-def command(update_id=1, text="/menu", chat_id=77):
-    return {"update_id": update_id, "message": {"message_id": 10, "chat": {"id": chat_id, "type": "private"}, "from": {"id": chat_id}, "text": text}}
+def command(update_id=1, text="/start", chat_id=77, sender_id=77, chat_type="private"):
+    return {"update_id": update_id, "message": {"message_id": 10,
+            "chat": {"id": chat_id, "type": chat_type, "title": "Учебная группа"},
+            "from": {"id": sender_id, "is_bot": False}, "text": text}}
 
 
 def callback(update_id=1, data="ik:payments:2026-10:0", chat_id=77, sender_id=77):
-    return {"update_id": update_id, "callback_query": {"id": "callback-test", "data": data, "from": {"id": sender_id},
-            "message": {"message_id": 10, "chat": {"id": chat_id, "type": "private"}}}}
+    return {"update_id": update_id, "callback_query": {"id": "callback-test", "data": data,
+            "from": {"id": sender_id}, "message": {"message_id": 10,
+            "chat": {"id": chat_id, "type": "private"}}}}
 
 
 class FakeClient:
@@ -68,9 +63,7 @@ class FakeClient:
 
     def call(self, method, payload=None):
         self.calls.append((method, payload))
-        if self.callback:
-            return self.callback(method, payload)
-        return True
+        return self.callback(method, payload) if self.callback else True
 
 
 def owned(db, settings, now=1000):
@@ -79,27 +72,59 @@ def owned(db, settings, now=1000):
     return scope, "owner"
 
 
-def test_summary_keeps_integer_totals_and_currencies_separate(settings, db):
-    payment(db, amount="0.10")
-    payment(db, amount="0.20")
-    payment(db, name="Сервер", amount="12.99", currency="USD", due="2026-10-20")
-    payment(db, name="Подписка", amount="9.95", currency="EUR", paid=True)
-    result = bot.build_view(db, settings, "summary")
-    assert "<b>RUB</b>\nПлан: 0,30" in result.text
-    assert "<b>USD</b>\nПлан: 12,99" in result.text
-    assert "<b>EUR</b>\nПлан: 9,95\nОплачено: 9,95" in result.text
-    assert "Периодов: 4 · оплачено: 1" in result.text
-    assert "Валюты не конвертируются" in result.text
-    assert len(result.text) < bot.MAX_TEXT
+def setup_code(db, settings):
+    with transaction(db):
+        admin = db.execute("SELECT * FROM users WHERE env_managed=1").fetchone()
+        return start_link(db, settings, admin, now=1000)["code"]
 
 
-def test_menu_links_public_https_panel_but_keeps_separate_provider(settings, db):
-    configured = replace(settings, origin="https://138.124.14.93")
-    for view in ("menu", "help"):
-        result = bot.build_view(db, configured, view)
-        links = [button for row in result.reply_markup["inline_keyboard"] for button in row if "url" in button]
-        assert links == [{"text": "🗂 Модуль продлений", "url": configured.origin},
-                         {"text": "🔗 Кабинет Aéza", "url": "https://my.aeza.ru/"}]
+def group_request(code, **kwargs):
+    return command(text="/connect@aezainkeep_bot " + code, chat_id=-1001234567890,
+                   chat_type="supergroup", **kwargs)
+
+
+def group_client(sender_admin=True, bot_status="administrator", can_send=True):
+    def reply(method, payload):
+        if method == "getChatAdministrators":
+            return [{"status": "administrator", "user": {"id": 77 if sender_admin else 88}}]
+        if method == "getChatMember":
+            return {"status": bot_status, "is_member": True, "can_send_messages": can_send}
+        if method == "getChat":
+            return {"permissions": {"can_send_messages": can_send}}
+        return True
+    return FakeClient(reply)
+
+
+def deny_financial_reads(db):
+    def authorize(action, table, *_):
+        import sqlite3
+        return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_READ and table in {
+            "recurring_payments", "payment_occurrences", "users", "reminder_outbox"} else sqlite3.SQLITE_OK
+    db.set_authorizer(authorize)
+
+
+@pytest.mark.parametrize("text", ["/menu", "/summary", "/payments", "/upcoming", "/overdue", "/paid 1", "/create rent"])
+def test_financial_commands_are_ignored_without_financial_reads(settings, db, text):
+    deny_financial_reads(db)
+    assert bot.handle_update(settings, db, command(text=text)) is None
+    assert bot.handle_update(settings, db, command(text=text, chat_id=-1001234567890, chat_type="supergroup")) is None
+
+
+@pytest.mark.parametrize("text", ["/start", "/help"])
+def test_private_help_is_public_static_and_never_reads_finances(settings, db, text):
+    deny_financial_reads(db)
+    action = bot.handle_update(settings, db, command(text=text))
+    assert action.method == "sendMessage"
+    assert "корпоративную группу" in action.payload["text"]
+    assert len(action.payload["text"]) < 1000
+    assert "parse_mode" not in action.payload
+
+
+def test_private_help_links_only_valid_public_https_panel(settings, db):
+    configured = replace(settings, origin="https://example.com")
+    action = bot.handle_update(configured, db, command())
+    assert action.payload["reply_markup"]["inline_keyboard"][0][0]["url"] == configured.origin
+    assert "reply_markup" not in bot.handle_update(settings, db, command()).payload
 
 
 @pytest.mark.parametrize("origin", ["http://127.0.0.1:8000", "https://127.0.0.1", "https://localhost",
@@ -109,117 +134,66 @@ def test_bot_never_links_local_or_credential_containing_panel(origin):
     assert bot.module_url(origin) is None
 
 
-def test_future_month_view_materializes_original_anchor_without_payment_edits(settings, db):
-    identifier = payment(db, due="2026-01-31", paid=True)
-    bot.build_view(db, settings, "payments", "2027-03")
-    dates = [row[0] for row in db.execute("SELECT due_date FROM payment_occurrences WHERE recurring_payment_id=? ORDER BY due_date", (identifier,))]
-    assert "2026-02-28" in dates and "2026-03-31" in dates and "2027-03-31" in dates
-    original = db.execute("SELECT is_paid,paid_at FROM payment_occurrences WHERE recurring_payment_id=? AND due_date='2026-01-31'", (identifier,)).fetchone()
-    assert tuple(original) == (1, "2026-10-24")
-    assert db.execute("SELECT COUNT(*) FROM reminder_outbox").fetchone()[0] == 0
+def test_targeted_setup_commands_require_matching_verified_username(settings, db):
+    assert bot.handle_update(settings, db, command(text="/start@OtherBot"), bot_username=settings.telegram_bot_username) is None
+    assert bot.handle_update(settings, db, command(text="/start@aezainkeep_bot")) is None
+    assert bot.handle_update(settings, db, command(text="/start@AEZAINKEEP_BOT"), bot_username=settings.telegram_bot_username).method == "sendMessage"
 
 
-def test_upcoming_and_overdue_have_calendar_boundaries_and_skip_paid(settings, db):
-    payment(db, name="Вчера", due="2026-10-23")
-    payment(db, name="Сегодня", due="2026-10-24")
-    payment(db, name="Через семь", due="2026-10-31")
-    payment(db, name="Через восемь", due="2026-11-01")
-    payment(db, name="Уже оплачено", due="2026-10-25", paid=True)
-    upcoming = bot.build_view(db, settings, "upcoming").text
-    assert "Сегодня" in upcoming and "Через семь" in upcoming
-    assert all(name not in upcoming for name in ("Вчера", "Через восемь", "Уже оплачено"))
-    overdue = bot.build_view(db, settings, "overdue").text
-    assert "Вчера" in overdue and "просрочка: 1 дн." in overdue
-    assert "Сегодня" not in overdue
-
-
-def test_pagination_html_escaping_and_message_bounds(settings, db):
-    for index in range(14):
-        payment(db, name=f"Запись {index:02d} <b> & " + "&" * 160)
-    first = bot.build_view(db, settings, "payments", page=0)
-    second = bot.build_view(db, settings, "payments", page=1)
-    last = bot.build_view(db, settings, "payments", page=999)
-    assert first.text.count("&lt;b&gt;") == bot.PAGE_SIZE
-    assert "Запись 00" in first.text and "Запись 06" not in first.text
-    assert "Запись 06" in second.text and "Запись 00" not in second.text
-    assert "Страница 3 из 3" in last.text
-    assert all(len(rendered.text) <= bot.MAX_TEXT for rendered in (first, second, last))
-    for row in first.reply_markup["inline_keyboard"]:
-        for button in row:
-            assert len(button["callback_data"].encode()) <= 64
-            assert bot.parse_callback(button["callback_data"], settings.today)
-
-
-@pytest.mark.parametrize("data", ["ik:delete:2026-10:0", "ik:payments:2026-10:-1", "ik:payments:2026-10:1000",
-                                     "ik:summary:9999-12:0", "ik:summary:2026-13:0", "ik:menu:1999-12:0",
-                                     "ik:menu:2026-10:0;DROP TABLE users", "я" * 64, None])
-def test_callback_allowlist_rejects_unknown_actions_and_unbounded_inputs(settings, data):
-    assert bot.parse_callback(data, settings.today) is None
-
-
-def test_exact_chat_authorization_and_private_callback_sender(settings, db, monkeypatch):
-    def no_data(*_, **__):
-        pytest.fail("Unauthorized update accessed financial data")
-    monkeypatch.setattr(bot, "build_view", no_data)
-    assert bot.handle_update(settings, db, command(chat_id=78)) is None
-    assert bot.handle_update(settings, db, command(chat_id="077")) is None
-    assert bot.handle_update(settings, db, callback(sender_id=78)) is None
-    inline = {"callback_query": {"id": "inline", "inline_message_id": "hidden", "from": {"id": 77}, "data": "ik:summary:2026-10:0"}}
+def test_old_callbacks_return_only_static_notice_no_financial_queries(settings, db):
+    deny_financial_reads(db)
+    action = bot.handle_update(settings, db, callback(data="ik:summary:2026-10:0"))
+    assert action.method == "answerCallbackQuery"
+    assert action.payload == {"callback_query_id": "callback-test", "text": "Работа с платежами доступна в веб-панели."}
+    inline = {"callback_query": {"id": "inline", "inline_message_id": "missing-chat", "data": "ik:summary:2026-10:0"}}
     assert bot.handle_update(settings, db, inline) is None
-    missing_type = callback()
-    del missing_type["callback_query"]["message"]["chat"]["type"]
-    assert bot.handle_update(settings, db, missing_type) is None
 
 
-@pytest.mark.parametrize("text", ["/start", "/menu", "/summary", "/payments", "/upcoming", "/overdue", "/help", "/summary@InKeepbot"])
-def test_command_views_have_html_and_compact_read_only_menu(settings, db, text):
-    action = bot.handle_update(settings, db, command(text=text), bot_username="InKeepbot")
-    assert action.method == "sendMessage"
-    assert action.payload["parse_mode"] == "HTML"
-    assert action.payload["chat_id"] == 77
-    assert len(action.payload["text"]) <= bot.MAX_TEXT
-    rows = action.payload["reply_markup"]["inline_keyboard"]
-    assert len(rows[0]) == len(rows[1]) == len(rows[-1]) == 2
-    assert [b["text"] for b in rows[-1]] == ["🔄 Обновить", "🏠 Меню"]
+def test_group_setup_requires_sender_admin_and_write_permission_then_web_confirm(settings, db):
+    code = setup_code(db, settings)
+    denied = group_client(sender_admin=False)
+    action = bot.handle_update(settings, db, group_request(code), bot_username=settings.telegram_bot_username, client=denied, bot_id=999, now=1001)
+    assert "администратор" in action.payload["text"]
+    assert [method for method, _ in denied.calls] == ["getChatAdministrators"]
+    assert db.execute("SELECT state FROM telegram_link_requests").fetchone()[0] == "pending"
+    blocked = group_client(bot_status="member", can_send=False)
+    action = bot.handle_update(settings, db, group_request(code), bot_username=settings.telegram_bot_username, client=blocked, bot_id=999, now=1001)
+    assert "Разрешите боту" in action.payload["text"]
+    assert [method for method, _ in blocked.calls] == ["getChatAdministrators", "getChatMember", "getChat"]
+    allowed = group_client(bot_status="member", can_send=True)
+    action = bot.handle_update(settings, db, group_request(code), bot_username=settings.telegram_bot_username, client=allowed, bot_id=999, now=1001)
+    assert "Подтвердите" in action.payload["text"] and code not in action.payload["text"]
+    row = db.execute("SELECT * FROM telegram_link_requests").fetchone()
+    assert row["state"] == "candidate" and row["chat_id"] == "-1001234567890"
+    assert active_connection(db, settings) is None
+    repeated = bot.handle_update(settings, db, group_request(code), bot_username=settings.telegram_bot_username, client=allowed, bot_id=999, now=1002)
+    assert "уже использован" in repeated.payload["text"]
 
 
-@pytest.mark.parametrize("view", ["menu", "help"])
-def test_aeza_menu_is_manual_and_account_link_does_not_authenticate(settings, db, view):
-    result = bot.build_view(db, settings, view)
-    assert "Aéza · Контроль продлений" in result.text
-    assert "вручную" in result.text and "вход" in result.text
-    buttons = [button for row in result.reply_markup["inline_keyboard"] for button in row]
-    links = [button for button in buttons if "url" in button]
-    assert links == [{"text": "🔗 Кабинет Aéza", "url": "https://my.aeza.ru/"}]
-    assert all("callback_data" not in button for button in links)
-    assert any(button["text"] == "🧾 Продления" and button["callback_data"].startswith("ik:payments:") for button in buttons)
-
-
-def test_callback_edits_original_and_unknown_mutation_command_only_shows_help(settings, db):
-    identifier = payment(db)
-    edit = bot.handle_update(settings, db, callback())
-    assert edit.method == "editMessageText" and edit.payload["message_id"] == 10
-    assert edit.callback_id == "callback-test"
-    help_action = bot.handle_update(settings, db, command(text="/paid 1"))
-    assert "<b>ℹ️ Помощь</b>" in help_action.payload["text"]
-    assert db.execute("SELECT is_paid FROM payment_occurrences WHERE recurring_payment_id=?", (identifier,)).fetchone()[0] == 0
-    invalid = bot.handle_update(settings, db, callback(data="invalid"))
-    assert invalid.method == "answerCallbackQuery" and "План" not in str(invalid.payload)
-
-
-def test_targeted_commands_require_verified_matching_username(settings, db):
-    assert bot.handle_update(settings, db, command(text="/summary@OtherBot"), bot_username="InKeepbot") is None
-    assert bot.handle_update(settings, db, command(text="/summary@InKeepbot")) is None
-    assert bot.handle_update(settings, db, command(text="/summary@inkeepBOT"), bot_username="InKeepbot").method == "sendMessage"
+@pytest.mark.parametrize("invalid", ["private", "positive_group", "anonymous", "bot_sender"])
+def test_setup_rejects_private_invalid_anonymous_and_bot_senders(settings, db, invalid):
+    code = setup_code(db, settings)
+    update = group_request(code)
+    if invalid == "private":
+        update["message"]["chat"] = {"id": 77, "type": "private"}
+    elif invalid == "positive_group":
+        update["message"]["chat"]["id"] = 77
+    elif invalid == "anonymous":
+        update["message"]["sender_chat"] = {"id": -1001234567890}
+    else:
+        update["message"]["from"]["is_bot"] = True
+    client = group_client()
+    assert bot.handle_update(settings, db, update, bot_username=settings.telegram_bot_username, client=client, bot_id=999, now=1001) is None
+    assert not client.calls and active_connection(db, settings) is None
 
 
 def test_offset_commits_before_send_and_unknown_reply_never_replays_after_restart(settings, db):
     scope, owner = owned(db, settings)
-    def fail_after_committed_offset(method, payload):
+    def timeout(method, payload):
         with connect(settings) as reader:
             assert reader.execute("SELECT next_offset FROM telegram_pollers WHERE scope=?", (scope,)).fetchone()[0] == 43
         raise bot.TelegramError("request_timeout")
-    client = FakeClient(fail_after_committed_offset)
+    client = FakeClient(timeout)
     assert bot.process_update(settings, db, client, scope, owner, command(update_id=42), now=1000) == "unknown"
     with connect(settings) as restarted:
         assert bot.process_update(settings, restarted, client, scope, owner, command(update_id=42), now=1000) == "duplicate"
@@ -227,41 +201,30 @@ def test_offset_commits_before_send_and_unknown_reply_never_replays_after_restar
     assert len(client.calls) == 1
 
 
-def test_callback_answers_once_and_edits_without_new_messages(settings, db):
+def test_callbacks_answer_once_and_never_edit_or_send_financial_data(settings, db):
     scope, owner = owned(db, settings)
     client = FakeClient()
     assert bot.process_update(settings, db, client, scope, owner, callback(update_id=4), now=1000) == "answered"
-    assert [method for method, _ in client.calls] == ["answerCallbackQuery", "editMessageText"]
-    assert client.calls[1][1]["message_id"] == 10
-
-
-def test_lease_loss_between_callback_ack_and_edit_suppresses_data_send(settings, db):
-    scope, owner = owned(db, settings)
-    def lose_lease(method, payload):
-        if method == "answerCallbackQuery":
-            db.execute("UPDATE telegram_pollers SET lease_owner='replacement' WHERE scope=?", (scope,))
-    client = FakeClient(lose_lease)
-    assert bot.process_update(settings, db, client, scope, owner, callback(), now=1000) == "failed"
     assert [method for method, _ in client.calls] == ["answerCallbackQuery"]
 
 
-def test_durable_rate_limit_consumes_offsets_but_bounds_replies(settings, db):
+def test_ignored_financial_commands_still_advance_durable_offset(settings, db):
     scope, owner = owned(db, settings)
     client = FakeClient()
-    results = [bot.process_update(settings, db, client, scope, owner, command(update_id=i), now=1000) for i in range(1, 12)]
-    assert results.count("answered") == bot.RATE_COUNT
-    assert results.count("throttled") == 11 - bot.RATE_COUNT
-    assert len(client.calls) == bot.RATE_COUNT
-    assert db.execute("SELECT next_offset FROM telegram_pollers WHERE scope=?", (scope,)).fetchone()[0] == 12
-    assert bot.process_update(settings, db, client, scope, owner, command(update_id=12), now=1011) == "answered"
-
-
-def test_unauthorized_updates_are_acknowledged_durably_without_financial_response(settings, db):
-    scope, owner = owned(db, settings)
-    client = FakeClient()
-    assert bot.process_update(settings, db, client, scope, owner, command(update_id=9, chat_id=99), now=1000) == "ignored"
+    assert bot.process_update(settings, db, client, scope, owner, command(update_id=9, text="/summary"), now=1000) == "ignored"
     assert not client.calls
     assert db.execute("SELECT next_offset FROM telegram_pollers WHERE scope=?", (scope,)).fetchone()[0] == 10
+
+
+def test_public_help_flood_is_bounded_per_chat_without_losing_offsets(settings, db):
+    scope, owner = owned(db, settings)
+    client = FakeClient()
+    for index in range(1, bot.RATE_COUNT + 1):
+        assert bot.process_update(settings, db, client, scope, owner, command(update_id=index), now=1000) == "answered"
+    assert bot.process_update(settings, db, client, scope, owner, command(update_id=bot.RATE_COUNT + 1), now=1000) == "throttled"
+    assert bot.process_update(settings, db, client, scope, owner, command(update_id=bot.RATE_COUNT + 2, chat_id=88, sender_id=88), now=1000) == "answered"
+    assert len(client.calls) == bot.RATE_COUNT + 1
+    assert db.execute("SELECT next_offset FROM telegram_pollers WHERE scope=?", (scope,)).fetchone()[0] == bot.RATE_COUNT + 3
 
 
 def test_receipt_retention_is_bounded_and_old_updates_still_cannot_repeat(settings, db):
@@ -337,7 +300,7 @@ def test_transient_bootstrap_timeout_recovers_with_same_lease(settings, db, star
         if method == "getWebhookInfo":
             return {"url": ""}
         if method == "getMe":
-            return {"username": "InKeepbot"}
+            return {"username": settings.telegram_bot_username, "id": 999}
         assert method == "getUpdates"
         stop.set()
         return []
@@ -391,7 +354,7 @@ def test_poll_restart_uses_committed_offset_and_short_long_poll(settings, db):
         if method == "getWebhookInfo":
             return {"url": ""}
         if method == "getMe":
-            return {"username": "InKeepbot"}
+            return {"username": settings.telegram_bot_username, "id": 999}
         if method == "getUpdates":
             calls += 1
             assert payload["timeout"] <= 20
@@ -409,7 +372,7 @@ def test_poll_restart_uses_committed_offset_and_short_long_poll(settings, db):
         if method == "getWebhookInfo":
             return {"url": ""}
         if method == "getMe":
-            return {"username": "InKeepbot"}
+            return {"username": settings.telegram_bot_username, "id": 999}
         assert method == "getUpdates" and payload["offset"] == 43
         restarted_stop.set()
         return []
@@ -447,14 +410,11 @@ def test_http_errors_have_fixed_safe_diagnostics(settings, kind, expected, caplo
     assert secret not in str(raised.value) and secret not in caplog.text
 
 
-def test_unchanged_callback_edit_is_success_and_methods_are_allowlisted(settings):
+def test_client_method_allowlist_prevents_old_financial_edit_and_webhook_mutation(settings):
     calls = []
-    def transport(request):
-        calls.append(request.url.path.rsplit("/", 1)[-1])
-        return httpx.Response(400, json={"ok": False, "error_code": 400, "description": "Bad Request: message is not modified"})
-    with httpx.Client(transport=httpx.MockTransport(transport)) as http:
+    with httpx.Client(transport=httpx.MockTransport(lambda request: calls.append(request) or httpx.Response(200, json={"ok": True, "result": True}))) as http:
         client = bot.TelegramClient(settings.telegram_bot_token, http)
-        assert client.call("editMessageText", {}) is True
-        with pytest.raises(bot.TelegramError, match="method_not_allowed"):
-            client.call("deleteWebhook")
-    assert calls == ["editMessageText"]
+        for method in ("editMessageText", "deleteWebhook", "deleteMessage"):
+            with pytest.raises(bot.TelegramError, match="method_not_allowed"):
+                client.call(method)
+    assert not calls

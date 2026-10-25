@@ -1,4 +1,4 @@
-"""Infrastructure demo data: isolated databases, no real settings or network."""
+"""Universal expense demo: isolated databases, no real settings or network."""
 from datetime import date, timedelta
 import socket
 
@@ -31,17 +31,17 @@ def snapshot(settings):
                 for table in ("users", "recurring_payments", "payment_occurrences", "reminder_outbox", "audit_events")}
 
 
-def test_aeza_seed_has_monthly_synthetic_infrastructure_and_independent_history(settings):
+def test_seed_has_monthly_synthetic_expenses_and_independent_history(settings):
     seed(settings)
     state = snapshot(settings)
     definitions = state["recurring_payments"]
     assert len(definitions) == 6
     names = [row["name"] for row in definitions]
-    assert any(name.startswith("VPS") for name in names)
-    assert any("Хранилище" in name for name in names)
-    assert any("Выделенный сервер" in name for name in names)
-    assert any("Домены" in name and "ежемесячный" in name for name in names)
-    assert not any("офис" in name.lower() or "графика" in name.lower() for name in names)
+    assert "Аренда офиса" in names
+    assert "Коммунальные услуги" in names
+    assert any("Подписка" in name for name in names)
+    assert "Интернет и связь" in names
+    assert not any("VPS" in name or "Aéza" in name for name in names)
     assert {row["currency"] for row in definitions} == {"RUB", "USD", "EUR"}
     assert all(row["frequency"] == "monthly" for row in definitions)
     assert all(isinstance(row["amount_minor"], int) and row["amount_minor"] > 0 for row in definitions)
@@ -54,7 +54,7 @@ def test_aeza_seed_has_monthly_synthetic_infrastructure_and_independent_history(
         if definition["initial_due_date"][:7] <= settings.today.strftime("%Y-%m"):
             assert any(row["due_date"] > definition["initial_due_date"] and not row["is_paid"] for row in owned)
     audit = next(row for row in state["audit_events"] if row["action"] == "demo_seeded")
-    assert "Aéza" in audit["description"] and "Суммы условные" in audit["description"] and "не тарифы" in audit["description"]
+    assert "Суммы условные" in audit["description"] and "не реальные счета" in audit["description"]
     assert [row["role"] for row in state["users"]] == ["admin"]
 
 
@@ -86,3 +86,6 @@ def test_demo_user_requires_an_explicit_password(settings, monkeypatch):
     assert demo["role"] == "user" and demo["env_managed"] == 0
     assert demo["password_hash"].startswith("scrypt$16384$8$5$")
     assert "Synthetic demo password" not in demo["password_hash"]
+    state = snapshot(settings)
+    assert {row["owner_id"] for row in state["recurring_payments"]} == {demo["id"], next(row["id"] for row in users if row["role"] == "admin")}
+    assert all(row["created_by"] != demo["id"] for row in state["recurring_payments"])

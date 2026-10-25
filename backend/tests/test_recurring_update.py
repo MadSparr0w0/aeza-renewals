@@ -227,7 +227,7 @@ def test_authentication_csrf_origin_and_server_role_are_required(client, setting
     assert created.status_code == 201, created.text
     ordinary_headers = login(client, "operator", USER_PASSWORD)
     before = snapshot(settings, identifier)
-    assert client.patch(path, headers=ordinary_headers, json=CHANGED).status_code == 403
+    assert client.patch(path, headers=ordinary_headers, json=CHANGED).status_code == 404
     assert snapshot(settings, identifier) == before
 
 

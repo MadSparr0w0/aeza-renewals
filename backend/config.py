@@ -23,6 +23,7 @@ class Settings:
     session_hours: int = 12
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    telegram_bot_username: str = "aezainkeep_bot"
 
     @property
     def zone(self):
@@ -65,7 +66,10 @@ def load_settings() -> Settings:
     hours = int(os.getenv("SESSION_HOURS", "12"))
     if not 1 <= hours <= 168:
         raise RuntimeError("SESSION_HOURS: допустимо от 1 до 168.")
+    bot_username = os.getenv("TELEGRAM_BOT_USERNAME", "aezainkeep_bot").lstrip("@")
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{4,31}", bot_username):
+        raise RuntimeError("TELEGRAM_BOT_USERNAME: укажите имя бота без ссылки.")
     return Settings(path if path.is_absolute() else ROOT / path, username,
                     os.environ["ADMIN_PASSWORD_HASH"], os.environ["APP_SECRET"], origin,
                     tuple(x.strip().rstrip("/") for x in os.getenv("APP_ALLOWED_ORIGINS", "").split(",") if x.strip()),
-                    zone, secure, hours, os.getenv("TELEGRAM_BOT_TOKEN", ""), os.getenv("TELEGRAM_CHAT_ID", ""))
+                    zone, secure, hours, os.getenv("TELEGRAM_BOT_TOKEN", ""), os.getenv("TELEGRAM_CHAT_ID", ""), bot_username)

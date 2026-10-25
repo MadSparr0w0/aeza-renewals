@@ -1,4 +1,4 @@
-"""Read-only Telegram menu: python -m backend.telegram_bot.
+"""Corporate group connection handler: python -m backend.telegram_bot.
 
 The polling offset is committed BEFORE any Telegram reply. Ambiguous replies
 are never replayed automatically. A database lease permits one poller per token;
@@ -27,12 +27,9 @@ import httpx
 
 from .config import load_settings
 from .db import connect, initialize, transaction
-from .domain import CURRENCIES, materialize, money, month_end
+from .telegram_connections import GROUP_TYPES, active_connection, disconnect, group_id, record_candidate
 
 logger = logging.getLogger("invoice_keeper.telegram_bot")
-PAGE_SIZE = 6
-MAX_PAGE = 999
-MAX_TEXT = 3800
 POLL_SECONDS = 20
 LEASE_SECONDS = 90
 HEARTBEAT_SECONDS = 10
@@ -40,10 +37,7 @@ RATE_WINDOW = 10
 RATE_COUNT = 8
 RECEIPT_DAYS = 7
 RECEIPT_LIMIT = 1000
-PRODUCT_NAME = "Aéza · Контроль продлений"
-AEZA_ACCOUNT_URL = "https://my.aeza.ru/"
-VIEWS = frozenset({"menu", "summary", "payments", "upcoming", "overdue", "help"})
-MONTH_NAMES = ("январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь")
+PRODUCT_NAME = "Aéza · Регулярные платежи"
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS telegram_pollers (
  scope TEXT PRIMARY KEY, next_offset INTEGER NOT NULL DEFAULT 0,
@@ -58,12 +52,6 @@ CREATE TABLE IF NOT EXISTS telegram_rate_limits (
  scope TEXT PRIMARY KEY, window_started INTEGER NOT NULL, request_count INTEGER NOT NULL
 );
 """
-
-
-@dataclass(frozen=True)
-class BotView:
-    text: str
-    reply_markup: dict
 
 
 @dataclass(frozen=True)
@@ -143,48 +131,20 @@ def prune_receipts(db, scope: str, now: int):
                    (scope, now - RECEIPT_DAYS * 86400, scope, RECEIPT_LIMIT))
 
 
-def within_rate_limit(db, scope: str, now: int) -> bool:
+def within_rate_limit(db, scope: str, now: int, limit=RATE_COUNT) -> bool:
     with transaction(db):
         row = db.execute("SELECT * FROM telegram_rate_limits WHERE scope=?", (scope,)).fetchone()
         if row is None or now - row["window_started"] >= RATE_WINDOW or now < row["window_started"]:
             db.execute("INSERT INTO telegram_rate_limits(scope,window_started,request_count) VALUES(?,?,1) ON CONFLICT(scope) DO UPDATE SET window_started=excluded.window_started,request_count=1", (scope, now))
             return True
-        if row["request_count"] >= RATE_COUNT:
+        if row["request_count"] >= limit:
             return False
         db.execute("UPDATE telegram_rate_limits SET request_count=request_count+1 WHERE scope=?", (scope,))
         return True
 
 
-def checked_month(value: str | None, today: date) -> date:
-    value = value or today.strftime("%Y-%m")
-    if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}", value):
-        raise ValueError("Некорректный месяц.")
-    result = date.fromisoformat(value + "-01")
-    if not 2000 <= result.year <= today.year + 5:
-        raise ValueError("Месяц вне разрешённого диапазона.")
-    return result
-
-
-def callback_data(view: str, month: str, page: int = 0) -> str:
-    return f"ik:{view}:{month}:{page}"
-
-
-def parse_callback(value, today):
-    if not isinstance(value, str) or len(value.encode("utf-8")) > 64:
-        return None
-    match = re.fullmatch(r"ik:(menu|summary|payments|upcoming|overdue|help):(\d{4}-\d{2}):(\d{1,3})", value)
-    if not match:
-        return None
-    view, month, page = match.groups()
-    try:
-        checked_month(month, today)
-    except ValueError:
-        return None
-    return view, month, int(page)
-
-
 def module_url(origin: str) -> str | None:
-    """Only link the configured public HTTPS panel, never a local dev server."""
+    """Only link the public HTTPS panel, without credentials or local addresses."""
     try:
         parsed = urlsplit(origin)
         host = parsed.hostname or ""
@@ -202,188 +162,111 @@ def module_url(origin: str) -> str | None:
         return None
 
 
-def keyboard(view: str, month: date, today: date, page=0, pages=1, panel_url=None):
-    key = month.strftime("%Y-%m")
-    button = lambda text, target, selected_month=key, selected_page=0: {"text": text, "callback_data": callback_data(target, selected_month, selected_page)}
-    rows = [[button("📊 Сводка", "summary"), button("🧾 Продления", "payments")],
-            [button("📅 Ближайшие", "upcoming"), button("⚠️ Просрочки", "overdue")]]
-    for row in rows:
-        for item in row:
-            if view in {"summary", "payments", "upcoming", "overdue"} and item["callback_data"].startswith("ik:" + view + ":"):
-                item["style"] = "primary"
-    if view in {"summary", "payments"}:
-        navigation = []
-        previous = month - timedelta(days=1)
-        following = (month_end(month) + timedelta(days=1))
-        if previous.year >= 2000:
-            navigation.append(button("‹ " + MONTH_NAMES[previous.month - 1].capitalize(), view, previous.strftime("%Y-%m")))
-        if following.year <= today.year + 5:
-            navigation.append(button(MONTH_NAMES[following.month - 1].capitalize() + " ›", view, following.strftime("%Y-%m")))
-        if navigation:
-            rows.append(navigation)
-    if pages > 1:
-        navigation = []
-        if page:
-            navigation.append(button("‹ Назад", view, key, page - 1))
-        if page + 1 < pages:
-            navigation.append(button("Далее ›", view, key, page + 1))
-        rows.append(navigation)
-    if view in {"menu", "help"}:
-        if panel_url:
-            rows.append([{"text": "🗂 Модуль продлений", "url": panel_url}])
-        rows.append([{"text": "🔗 Кабинет Aéza", "url": AEZA_ACCOUNT_URL}])
-    rows.append([button("🔄 Обновить", view, key, page), button("🏠 Меню", "menu", today.strftime("%Y-%m"))])
-    return {"inline_keyboard": rows}
-
-
-def human_money(minor: int) -> str:
-    whole, cents = money(minor).split(".")
-    return f"{int(whole):,}".replace(",", " ") + "," + cents
-
-
-def safe_name(value: str) -> str:
-    value = " ".join(value.split())
-    if len(value) > 70:
-        value = value[:69] + "…"
-    return escape(value, quote=True)
-
-
-def build_view(db, settings, view="menu", month=None, page=0) -> BotView:
-    """Build bounded HTML and buttons; no Telegram requests or payment edits.
-
-    Derived monthly periods are materialized in a transaction for views that
-    read financial data. Call with an idle database connection, not in a nested
-    transaction. Useful for a deliberate one-time menu send by the operator.
-    """
-    today = settings.today
-    if view not in VIEWS or isinstance(page, bool) or not isinstance(page, int) or not 0 <= page <= MAX_PAGE:
-        raise ValueError("Некорректный раздел или страница.")
-    first = checked_month(month, today)
-    key = first.strftime("%Y-%m")
-    label = MONTH_NAMES[first.month - 1] + " " + str(first.year)
-    if view == "menu":
-        text = "<b>🗂 " + PRODUCT_NAME + "</b>\n\nСроки продлений и история отметок оплаты. Напоминания — за 3 дня до срока. Учёт команда ведёт вручную в веб-панели.\n\n«Модуль продлений» — панель учёта. «Кабинет Aéza» — оплата и управление услугами с отдельным входом.\n\n/help — описание команд."
-        return BotView(text, keyboard(view, first, today, panel_url=module_url(settings.origin)))
-    if view == "help":
-        text = "<b>ℹ️ Помощь</b>\n<b>" + PRODUCT_NAME + "</b>\n\n/start или /menu — открыть меню\n/summary — итоги продлений за текущий месяц\n/payments — сроки продлений за текущий месяц\n/upcoming — неоплаченные продления на ближайшие 7 дней\n/overdue — все неоплаченные просрочки\n/help — эта справка\n\nКнопки месяцев меняют период, «Обновить» показывает свежие данные. Кнопки обновляют это же сообщение.\n\nRUB, USD и EUR учитываются отдельно. Даты — в часовом поясе " + escape(settings.timezone) + ". В день срока просрочки нет.\n\nДанные вносятся вручную. Отметка «Оплачено» фиксирует подтверждение команды и не проводит платёж. Прекращение учёта не удаляет сервер.\n\nДля оплаты и управления реальными услугами откройте «Кабинет Aéza»; вход в него отдельный. Бот показывает данные только разрешённого чата."
-        return BotView(text, keyboard(view, first, today, panel_url=module_url(settings.origin)))
-    with transaction(db):
-        horizon = month_end(first) if view in {"summary", "payments"} else today + timedelta(days=7)
-        materialize(db, today, horizon)
-        if view == "summary":
-            totals = {currency: {"planned": 0, "paid": 0, "unpaid": 0, "overdue": 0} for currency in CURRENCIES}
-            count = paid_count = 0
-            rows = db.execute("""SELECT currency,COUNT(*) AS total,SUM(is_paid) AS paid_count,
-              SUM(amount_minor) AS planned,
-              SUM(CASE WHEN is_paid=1 THEN amount_minor ELSE 0 END) AS paid,
-              SUM(CASE WHEN is_paid=0 THEN amount_minor ELSE 0 END) AS unpaid,
-              SUM(CASE WHEN is_paid=0 AND due_date<? THEN amount_minor ELSE 0 END) AS overdue
-              FROM payment_occurrences WHERE substr(due_date,1,7)=? GROUP BY currency""", (today.isoformat(), key)).fetchall()
-            for row in rows:
-                totals[row["currency"]] = {field: row[field] for field in totals[row["currency"]]}
-                count += row["total"]
-                paid_count += row["paid_count"]
-            lines = ["<b>📊 Продления Aéza · " + label + "</b>"]
-            for currency, amounts in totals.items():
-                lines.extend(["", "<b>" + currency + "</b>", "План: " + human_money(amounts["planned"]),
-                              "Оплачено: " + human_money(amounts["paid"]), "К оплате: " + human_money(amounts["unpaid"]),
-                              "Просрочено: " + human_money(amounts["overdue"])])
-            lines.extend(["", f"Периодов: {count} · оплачено: {paid_count}", "Валюты не конвертируются. Отметки оплаты ведутся вручную."])
-            return BotView("\n".join(lines), keyboard(view, first, today))
-        if view == "payments":
-            where, values = "substr(o.due_date,1,7)=?", [key]
-            title = "🧾 Продления · " + label
-        elif view == "upcoming":
-            where, values = "o.is_paid=0 AND o.due_date>=? AND o.due_date<=?", [today.isoformat(), (today + timedelta(days=7)).isoformat()]
-            title = "📅 Продления на ближайшие 7 дней"
-        else:
-            where, values = "o.is_paid=0 AND o.due_date<?", [today.isoformat()]
-            title = "⚠️ Просроченные продления"
-        total = db.execute("SELECT COUNT(*) FROM payment_occurrences o WHERE " + where, values).fetchone()[0]
-        pages = max(1, min(MAX_PAGE + 1, (total + PAGE_SIZE - 1) // PAGE_SIZE))
-        page = min(page, pages - 1)
-        rows = db.execute("""SELECT o.*,r.active FROM payment_occurrences o
-          JOIN recurring_payments r ON r.id=o.recurring_payment_id WHERE """ + where + " ORDER BY o.due_date,o.id LIMIT ? OFFSET ?", [*values, PAGE_SIZE, page * PAGE_SIZE]).fetchall()
-    lines = ["<b>" + title + "</b>", ""]
-    for row in rows:
-        due = date.fromisoformat(row["due_date"])
-        if row["is_paid"]:
-            status = "отметка об оплате: " + date.fromisoformat(row["paid_at"]).strftime("%d.%m.%Y")
-        elif due < today:
-            status = "просрочка: " + str((today - due).days) + " дн."
-        else:
-            status = "оплата не отмечена"
-        archived = " · архив" if not row["active"] else ""
-        lines.extend(["<b>" + safe_name(row["name"]) + "</b>" + archived,
-                      human_money(row["amount_minor"]) + " " + row["currency"] + " · " + due.strftime("%d.%m.%Y"), status, ""])
-    if not rows:
-        lines.append("Продлений в этом разделе нет.")
-    else:
-        lines.append(f"Страница {page + 1} из {pages} · записей: {total}")
-    text = "\n".join(lines)
-    if len(text) > MAX_TEXT:
-        raise ValueError("Сообщение превышает безопасный размер.")
-    return BotView(text, keyboard(view, first, today, page, pages))
-
-
 def authorized_context(settings, update):
-    if not isinstance(update, dict):
+    """Accept setup/service events only. No chat can read financial tables."""
+    if not isinstance(update,dict):
         return None
-    callback = update.get("callback_query")
-    if isinstance(callback, dict):
-        message = callback.get("message")
-        if not isinstance(message, dict) or not isinstance(callback.get("id"), str) or len(callback["id"]) > 128:
-            return None
-        chat = message.get("chat")
-        sender = callback.get("from")
-        if not isinstance(chat, dict) or str(chat.get("id")) != settings.telegram_chat_id:
-            return None
-        if chat.get("type") not in {"private", "group", "supergroup", "channel"}:
-            return None
-        if chat.get("type") == "private" and (not isinstance(sender, dict) or str(sender.get("id")) != str(chat["id"])):
-            return None
-        if not isinstance(message.get("message_id"), int) or isinstance(message["message_id"], bool) or message["message_id"] <= 0:
-            return None
-        return message, callback
-    message = update.get("message")
-    if not isinstance(message, dict) or not isinstance(message.get("chat"), dict):
+    event=update.get("my_chat_member")
+    if isinstance(event,dict) and isinstance(event.get("chat"),dict):
+        return event,None
+    callback=update.get("callback_query")
+    if isinstance(callback,dict):
+        message=callback.get("message")
+        if (isinstance(message,dict) and isinstance(message.get("chat"),dict)
+                and isinstance(callback.get("id"),str) and len(callback["id"])<=128):
+            return message,callback
         return None
-    if str(message["chat"].get("id")) != settings.telegram_chat_id:
+    message=update.get("message")
+    if not isinstance(message,dict) or not isinstance(message.get("chat"),dict):
         return None
-    return message, None
+    if message.get("migrate_to_chat_id") or message.get("migrate_from_chat_id"):
+        return message,None
+    content=message.get("text")
+    if not isinstance(content,str) or len(content)>512 or not content.startswith("/"):
+        return None
+    command=content.split(maxsplit=1)[0].split("@",1)[0].lower()
+    if command not in {"/connect","/start","/help"}:
+        return None
+    return message,None
 
 
-def handle_update(settings, db, update, bot_username=None) -> BotAction | None:
-    """Authorize before reading financial tables. No mutation commands exist."""
-    context = authorized_context(settings, update)
+def handle_update(settings,db,update,bot_username=None,client=None,bot_id=None,now=None):
+    context=authorized_context(settings,update)
     if context is None:
         return None
-    message, callback = context
+    message,callback=context
+    chat=message["chat"]
+    cid=group_id(chat.get("id"))
     if callback:
-        selected = parse_callback(callback.get("data"), settings.today)
-        if selected is None:
-            return BotAction("answerCallbackQuery", {"callback_query_id": callback["id"], "text": "Кнопка устарела. Откройте /menu."})
-        view, month, page = selected
-    else:
-        text = message.get("text")
-        if not isinstance(text, str) or len(text) > 4096 or not text.startswith("/"):
-            return None
-        addressed = text.split(maxsplit=1)[0].split("@", 1)
-        if len(addressed) > 1 and (not bot_username or addressed[1].casefold() != bot_username.casefold()):
-            return None
-        command = addressed[0].lower()
-        view = {"/start": "menu", "/menu": "menu", "/summary": "summary", "/payments": "payments", "/upcoming": "upcoming", "/overdue": "overdue", "/help": "help"}.get(command, "help")
-        month, page = None, 0
-    rendered = build_view(db, settings, view, month, page)
-    payload = {"chat_id": message["chat"]["id"], "text": rendered.text, "parse_mode": "HTML", "reply_markup": rendered.reply_markup, "disable_web_page_preview": True}
-    if callback:
-        payload["message_id"] = message["message_id"]
-        return BotAction("editMessageText", payload, callback["id"])
-    return BotAction("sendMessage", payload)
+        return BotAction("answerCallbackQuery",{"callback_query_id":callback["id"],"text":"Работа с платежами доступна в веб-панели."})
+    event=update.get("my_chat_member")
+    if isinstance(event,dict):
+        member=event.get("new_chat_member") or {}
+        status=member.get("status")
+        can_send=status in {"creator","administrator","member"} or (status=="restricted" and member.get("is_member") is True and member.get("can_send_messages") is True)
+        if not can_send:
+            with transaction(db):
+                active=active_connection(db,settings)
+                if active and active["chat_id"]==cid:
+                    disconnect(db,reason="bot_removed_or_restricted")
+                db.execute("UPDATE telegram_link_requests SET state='revoked' WHERE chat_id=? AND state IN ('pending','candidate')",(cid,))
+        return None
+    if message.get("migrate_to_chat_id") or message.get("migrate_from_chat_id"):
+        # A migration changes the physical recipient. Require a fresh explicit
+        # confirmation instead of forwarding an old queue to a new chat ID.
+        old=group_id(message.get("migrate_from_chat_id")) or cid
+        with transaction(db):
+            active=active_connection(db,settings)
+            if active and active["chat_id"]==old:
+                disconnect(db,reason="group_migrated_reconnect_required")
+        return None
+    content=message.get("text","").split(maxsplit=1)
+    addressed=content[0].split("@",1)
+    if len(addressed)>1 and (not bot_username or addressed[1].casefold()!=bot_username.casefold()):
+        return None
+    command=addressed[0].lower()
+    sender=message.get("from") or {}
+    sender_id=sender.get("id")
+    if isinstance(sender_id,bool) or not isinstance(sender_id,int) or sender_id<=0 or sender.get("is_bot"):
+        return None
+    def reply(text):
+        payload={"chat_id":chat["id"],"text":text,"disable_web_page_preview":True}
+        url=module_url(settings.origin)
+        if url:
+            payload["reply_markup"]={"inline_keyboard":[[{"text":"Открыть веб-панель","url":url}]]}
+        return BotAction("sendMessage",payload)
+    if command in {"/start","/help"}:
+        if chat.get("type")=="private" and str(chat.get("id"))==str(sender_id):
+            return reply("📋 Aéza · Регулярные платежи\n\nБот отправляет напоминания в корпоративную группу. Личные кабинеты, создание платежей и отметки об оплате доступны на сайте.\n\nЧтобы подключить группу, администратор создаёт код в разделе Telegram веб-панели.")
+        if command=="/start" and cid and chat.get("type") in GROUP_TYPES:
+            return reply("Бот добавлен. Администратор может подключить эту группу кодом из раздела Telegram веб-панели.")
+        return None
+    if command!="/connect" or not cid or chat.get("type") not in GROUP_TYPES or message.get("sender_chat"):
+        return None
+    if len(content)!=2 or not re.fullmatch(r"[A-Za-z0-9_-]{32}",content[1]):
+        return reply("Создайте код в разделе Telegram веб-панели и отправьте команду подключения целиком.")
+    if client is None or not isinstance(bot_id,int):
+        return None
+    administrators=client.call("getChatAdministrators",{"chat_id":cid})
+    allowed=isinstance(administrators,list) and any(isinstance(a,dict) and a.get("status") in {"creator","administrator"} and isinstance(a.get("user"),dict) and a["user"].get("id")==sender_id for a in administrators)
+    if not allowed:
+        return reply("Подключить чат может его администратор.")
+    membership=client.call("getChatMember",{"chat_id":cid,"user_id":bot_id})
+    member_status=membership.get("status") if isinstance(membership,dict) else None
+    writable=member_status in {"creator","administrator"} or (member_status=="restricted" and membership.get("is_member") is True and membership.get("can_send_messages") is True)
+    if member_status == "member":
+        details=client.call("getChat",{"chat_id":cid})
+        permissions=details.get("permissions") if isinstance(details,dict) else None
+        writable=isinstance(permissions,dict) and permissions.get("can_send_messages") is True
+    if not writable:
+        return reply("Разрешите боту отправлять сообщения в этой группе и повторите подключение.")
+    if not record_candidate(db,settings,content[1],chat,sender_id,now=now):
+        return reply("Код истёк или уже использован. Создайте новый код в веб-панели.")
+    return reply("✅ Группа найдена. Подтвердите её название в разделе Telegram веб-панели. После подтверждения здесь будут появляться напоминания о платежах команды.")
 
 
 class TelegramClient:
-    METHODS = frozenset({"getMe", "getWebhookInfo", "getUpdates", "sendMessage", "editMessageText", "answerCallbackQuery"})
+    METHODS = frozenset({"getMe", "getWebhookInfo", "getUpdates", "sendMessage", "answerCallbackQuery", "getChatAdministrators", "getChatMember", "getChat"})
 
     def __init__(self, token: str, client=None):
         # HTTPX's INFO request line embeds the bot token in the URL. Keep the
@@ -435,7 +318,7 @@ class TelegramClient:
             raise TelegramError("network_error") from None
 
 
-def process_update(settings, db, client, scope, owner, update, now=None, bot_username=None):
+def process_update(settings, db, client, scope, owner, update, now=None, bot_username=None, bot_id=None):
     current_time = (lambda: int(time.time())) if now is None else (lambda: now)
     observed_at = current_time()
     update_id = update.get("update_id") if isinstance(update, dict) else None
@@ -446,12 +329,14 @@ def process_update(settings, db, client, scope, owner, update, now=None, bot_use
     if authorized_context(settings, update) is None:
         record_outcome(db, scope, update_id, "ignored")
         return "ignored"
-    if not within_rate_limit(db, scope, observed_at):
+    service = isinstance(update.get("my_chat_member"), dict) or any(
+        authorized_context(settings, update)[0].get(key) for key in ("migrate_to_chat_id", "migrate_from_chat_id"))
+    if not service and (not within_rate_limit(db, scope+":global", observed_at, limit=60) or not within_rate_limit(db, scope+":"+str(authorized_context(settings, update)[0]["chat"].get("id")), observed_at)):
         # No financial data and no repeated API responses during a flood.
         record_outcome(db, scope, update_id, "throttled")
         return "throttled"
     try:
-        action = handle_update(settings, db, update, bot_username)
+        action = handle_update(settings, db, update, bot_username, client=client, bot_id=bot_id, now=observed_at)
         if action is None:
             record_outcome(db, scope, update_id, "ignored")
             return "ignored"
@@ -477,8 +362,8 @@ def process_update(settings, db, client, scope, owner, update, now=None, bot_use
 
 def run_polling(settings, client=None, stop_event=None, stop_file: Path | None = None):
     """Run one leased poller. No webhook deletion or automatic reply retries."""
-    if not settings.telegram_bot_token or not re.fullmatch(r"-?[1-9]\d{0,19}", settings.telegram_chat_id):
-        logger.error("Для меню бота укажите TELEGRAM_BOT_TOKEN и числовой TELEGRAM_CHAT_ID.")
+    if not settings.telegram_bot_token:
+        logger.error("Для подключения корпоративной группы укажите TELEGRAM_BOT_TOKEN.")
         return 1
     if (stop_event and stop_event.is_set()) or (stop_file and stop_file.exists()):
         return 0
@@ -510,7 +395,7 @@ def run_polling(settings, client=None, stop_event=None, stop_file: Path | None =
     try:
         with connect(settings) as db:
             if not acquire_lease(db, scope, owner, int(time.time())):
-                logger.error("Другой процесс уже управляет меню этого бота. Второй опрос не запущен.")
+                logger.error("Другой процесс уже управляет опросом этого бота. Второй опрос не запущен.")
                 return 2
             heartbeat_thread = threading.Thread(target=maintain_lease, name="telegram-poller-heartbeat", daemon=True)
             heartbeat_thread.start()
@@ -527,7 +412,7 @@ def run_polling(settings, client=None, stop_event=None, stop_file: Path | None =
                         except TelegramError as exc:
                             if exc.code in {"access_rejected", "polling_conflict", "lease_lost"}:
                                 raise
-                            logger.warning("Подготовка меню Telegram временно недоступна: %s. Повтор после паузы.", exc.code)
+                            logger.warning("Подключение к Telegram временно недоступна: %s. Повтор после паузы.", exc.code)
                             for _ in range(min(max(exc.retry_after or 5, 1), 300)):
                                 if stopping():
                                     return None
@@ -546,14 +431,17 @@ def run_polling(settings, client=None, stop_event=None, stop_file: Path | None =
                 bot_username = identity.get("username") if isinstance(identity, dict) else None
                 if not isinstance(bot_username, str) or not re.fullmatch(r"[A-Za-z0-9_]{5,32}", bot_username):
                     raise TelegramError("identity_unknown")
-                logger.info("Меню бота запущено; разрешён один настроенный чат.")
+                bot_id = identity.get("id")
+                if not isinstance(bot_id,int) or isinstance(bot_id,bool) or bot_username.casefold()!=settings.telegram_bot_username.casefold():
+                    raise TelegramError("identity_unknown")
+                logger.info("Обработчик подключения корпоративной группы запущен.")
                 while not stopping():
                     if not lease_owned(db, scope, owner, int(time.time())):
                         logger.error("Аренда процесса бота потеряна; опрос остановлен.")
                         return 2
                     offset = db.execute("SELECT next_offset FROM telegram_pollers WHERE scope=?", (scope,)).fetchone()[0]
                     try:
-                        updates = client.call("getUpdates", {"offset": offset, "timeout": POLL_SECONDS, "limit": 20, "allowed_updates": ["message", "callback_query"]})
+                        updates = client.call("getUpdates", {"offset": offset, "timeout": POLL_SECONDS, "limit": 20, "allowed_updates": ["message", "callback_query", "my_chat_member"]})
                         if not isinstance(updates, list):
                             raise TelegramError("invalid_response")
                     except TelegramError as exc:
@@ -574,7 +462,7 @@ def run_polling(settings, client=None, stop_event=None, stop_file: Path | None =
                     for update in sorted(valid, key=lambda item: item["update_id"]):
                         if stopping():
                             break
-                        process_update(settings, db, client, scope, owner, update, bot_username=bot_username)
+                        process_update(settings, db, client, scope, owner, update, bot_username=bot_username, bot_id=bot_id)
                     prune_receipts(db, scope, int(time.time()))
                 return 0
             finally:
@@ -583,10 +471,10 @@ def run_polling(settings, client=None, stop_event=None, stop_file: Path | None =
                     heartbeat_thread.join(timeout=2)
                 release_lease(db, scope, owner)
     except TelegramError as exc:
-        logger.error("Меню бота не запущено: %s. Секреты не журналируются.", exc.code)
+        logger.error("Обработчик бота не запущен: %s. Секреты не журналируются.", exc.code)
         return 1
     except Exception:
-        logger.error("Меню бота остановлено из-за внутренней ошибки. Проверьте конфигурацию и доступ к базе.")
+        logger.error("Обработчик бота остановлен из-за внутренней ошибки. Проверьте конфигурацию и доступ к базе.")
         return 1
     finally:
         stop_event.set()
@@ -598,7 +486,7 @@ def main():
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="backslashreplace")
-    parser = argparse.ArgumentParser(description="Aéza · Контроль продлений: Telegram-меню сроков и ручного учёта оплаты.")
+    parser = argparse.ArgumentParser(description="Aéza · Регулярные платежи: подключение корпоративной группы для уведомлений.")
     parser.add_argument("--stop-file", type=Path, help="Путь к файлу мягкой остановки; процесс только проверяет его наличие.")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -612,10 +500,11 @@ def main():
         initialize(settings)
         code = run_polling(settings, stop_event=stop_event, stop_file=args.stop_file)
     except Exception:
-        logger.error("Не удалось запустить меню бота. Проверьте окружение и базу; секреты не выводятся.")
+        logger.error("Не удалось запустить обработчик бота. Проверьте окружение и базу; секреты не выводятся.")
         code = 1
     raise SystemExit(code)
 
 
 if __name__ == "__main__":
     main()
+

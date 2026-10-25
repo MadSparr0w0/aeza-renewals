@@ -20,7 +20,7 @@ class StrictModel(BaseModel):
 
 class Login(StrictModel):
     model_config = ConfigDict(title="Данные для входа")
-    username: str = Field(min_length=1, max_length=64, title="Логин", description="Логин администратора из окружения или обычного пользователя.")
+    username: str = Field(min_length=1, max_length=64, title="Логин", description="Логин администратора из окружения или участника команды.")
     password: str = Field(min_length=1, max_length=256, title="Пароль", description="Пароль учётной записи. Не сохраняется в документации и не возвращается в ответе.")
 
 
@@ -31,6 +31,7 @@ class RecurringCreate(StrictModel):
     currency: Literal["RUB", "USD", "EUR"] = Field(title="Валюта", description="RUB — рубли, USD — доллары, EUR — евро. Валюты учитываются отдельно.")
     next_due_date: date = Field(title="Ближайший срок оплаты", description="Календарная дата в формате YYYY-MM-DD в общем часовом поясе приложения; от 2000 года до пяти лет вперёд.")
     frequency: Literal["monthly"] = Field(default="monthly", title="Периодичность", description="monthly — ежемесячно. Исходное число месяца сохраняется; в коротком месяце выбирается последний день.")
+    owner_id: int | None = Field(default=None, gt=0, strict=True, title="Владелец платежа", description="Администратор может выбрать существующего участника. Обычный пользователь создаёт платёж только для себя. Без поля владельцем становится автор запроса.")
 
     @field_validator("amount")
     @classmethod
@@ -82,3 +83,25 @@ class UserPatch(StrictModel):
     username: str | None = Field(default=None, min_length=3, max_length=64, pattern=r"^[A-Za-z0-9_.@-]+$", title="Новый логин", description="Латинские буквы, цифры и символы _, -, ., @. Если поле не передано, логин сохраняется.")
     full_name: str | None = Field(default=None, min_length=1, max_length=100, title="Новое имя пользователя", description="Отображаемое имя. Если поле не передано, имя сохраняется.")
     password: str | None = Field(default=None, min_length=12, max_length=256, title="Новый пароль", description="От 12 до 256 символов. Изменение пользователя завершает все его активные сессии.")
+
+
+class PasswordChange(StrictModel):
+    model_config = ConfigDict(title="Смена собственного пароля")
+    current_password: str = Field(min_length=1, max_length=256, title="Текущий пароль", description="Текущий пароль участника. Администратор из окружения меняется только оператором.")
+    new_password: str = Field(min_length=12, max_length=256, title="Новый пароль", description="От 12 до 256 символов. После изменения все сессии завершаются; потребуется повторный вход.")
+
+
+class InvitationCreate(StrictModel):
+    model_config = ConfigDict(title="Приглашение участника")
+    username: str = Field(min_length=3, max_length=64, pattern=r"^[A-Za-z0-9_.@-]+$", title="Логин участника", description="Свободный логин. Участник сам задаст пароль по одноразовой ссылке.")
+    full_name: str = Field(min_length=1, max_length=100, title="Имя участника", description="Имя, отображаемое в кабинете и уведомлениях.")
+
+
+class InvitationToken(StrictModel):
+    model_config = ConfigDict(title="Одноразовое приглашение")
+    token: str = Field(min_length=32, max_length=128, pattern=r"^[A-Za-z0-9_-]+$", title="Токен приглашения", description="Секрет из одноразовой ссылки, действующей 72 часа. Не публикуйте ссылку.")
+
+
+class InvitationAccept(InvitationToken):
+    model_config = ConfigDict(title="Принятие приглашения")
+    password: str = Field(min_length=12, max_length=256, title="Новый пароль", description="Пароль участника от 12 до 256 символов. Ссылка может быть использована только один раз.")

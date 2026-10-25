@@ -109,8 +109,8 @@ export function Modal({
   );
 }
 export function Empty({
-  title = "Продлений пока нет",
-  text = "Добавьте услугу в учёт продлений.",
+  title = "Платежей пока нет",
+  text = "Добавьте первый регулярный платёж.",
   action,
 }: {
   title?: string;
@@ -120,7 +120,7 @@ export function Empty({
   return (
     <div className="empty-state">
       <span>
-        <BrandIcon name="services" size={28} />
+        <BrandIcon name="payments" size={28} />
       </span>
       <h3>{title}</h3>
       <p>{text}</p>
@@ -173,10 +173,10 @@ export function Metric({
 }
 export function downloadCSV(items: Occurrence[], month: string) {
   const headers = [
-    "Название услуги",
-    "Стоимость продления",
+    "Название платежа",
+    "Сумма",
     "Валюта",
-    "Срок продления",
+    "Срок оплаты",
     "Статус",
     "Фактическая дата",
     "Просрочка (дни)",
@@ -209,7 +209,7 @@ export function downloadCSV(items: Occurrence[], month: string) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `aeza-renewals-${month}.csv`;
+  a.download = `regular-payments-${month}.csv`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }

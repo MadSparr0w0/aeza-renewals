@@ -11,6 +11,20 @@ from backend.db import connect, initialize, transaction
 from backend.domain import add_recurring, amount_minor, materialize, next_month, occurrence_json, schedule_reminders
 from backend.security import hash_password, verify_password
 from backend.worker import SendResult, claim, deliver, finish, tick
+from backend.telegram_connections import token_scope
+
+
+def linked_group(db, settings):
+    db.execute("""INSERT OR REPLACE INTO telegram_connection
+      (id,chat_id,chat_title,chat_type,bot_scope,active,connected_at,connected_on,connected_by)
+      VALUES(1,'-1000000000','Команда','supergroup',?,1,'2000-01-01T00:00:00+00:00','2000-01-01',1)""",
+               (token_scope(settings.telegram_bot_token),))
+
+
+def delivery_row(settings, **extra):
+    return {"name": "Тест", "amount_minor": 100, "currency": "RUB", "due_date": "2026-10-23",
+            "owner_name": "Участник", "recipient_chat_id": "-1000000000",
+            "delivery_scope": token_scope(settings.telegram_bot_token), **extra}
 
 
 @pytest.fixture
@@ -22,6 +36,8 @@ def settings(tmp_path):
 def add_due(settings, due=None):
     initialize(settings)
     with connect(settings) as db, transaction(db):
+        if settings.telegram_bot_token:
+            linked_group(db, settings)
         identifier = add_recurring(db, name="Тест", amount="125.67", currency="RUB", next_due_date=due or settings.today + timedelta(days=2))
         schedule_reminders(db, settings.today)
     return identifier
@@ -121,29 +137,31 @@ def test_no_credentials_means_no_network(settings):
     assert not tick(settings, sender=lambda *_: pytest.fail("unconfigured Telegram invoked"))
 
 
-def test_reminder_escapes_untrusted_name_and_links_to_authorized_menu(settings):
+def test_reminder_escapes_owner_and_name_and_links_to_web_panel(settings):
     captured = []
     def handler(request):
         captured.append(json.loads(request.content))
         return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        result = deliver(settings, {"name": '<a href="https://example.invalid">Название</a>',
-                         "amount_minor": 8500001, "currency": "RUB", "due_date": "2026-10-23"}, client)
+        from dataclasses import replace
+        settings = replace(settings, origin="https://example.com")
+        result = deliver(settings, delivery_row(settings, name='<a href="https://example.invalid">Название</a>',
+                         owner_name="<b>Иван</b>", amount_minor=8500001), client)
     assert result.state == "sent"
     payload = captured[0]
     assert payload["chat_id"] == settings.telegram_chat_id
     assert payload["parse_mode"] == "HTML"
     assert '<a href=' not in payload["text"] and '&lt;a href=' in payload["text"]
     assert '85 000,01 ₽' in payload["text"] and '23.10.2026' in payload["text"]
-    assert "Aéza · Срок продления" in payload["text"]
-    assert "учёта ведутся вручную" in payload["text"]
-    assert payload["reply_markup"]["inline_keyboard"][0][0]["callback_data"].startswith("ik:menu:")
+    assert "Регулярный платёж" in payload["text"] and "&lt;b&gt;Иван&lt;/b&gt;" in payload["text"]
+    assert payload["reply_markup"]["inline_keyboard"][0][0]["url"] == settings.origin
+    assert "callback_data" not in json.dumps(payload)
 
 
 @pytest.mark.parametrize("body", [[], {"ok": True}, {"ok": True, "result": {"message_id": True}}])
 def test_malformed_delivery_acknowledgement_is_unknown(settings, body):
     with httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200, json=body))) as client:
-        result = deliver(settings, {"name": "Тест", "amount_minor": 100, "currency": "RUB", "due_date": "2026-10-23"}, client)
+        result = deliver(settings, delivery_row(settings), client)
     assert result.state == "unknown" and result.error == "telegram_invalid_response"
 
 
@@ -158,7 +176,7 @@ def test_telegram_delivery_classification(settings, outcome, expected):
             return httpx.Response(429, json={"ok": False, "error_code": 429, "parameters": {"retry_after": 75}})
         return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        result = deliver(settings, {"name": "Тест", "amount_minor": 199, "currency": "USD", "due_date": "2026-10-23"}, client)
+        result = deliver(settings, delivery_row(settings, amount_minor=199, currency="USD"), client)
     assert result.state == expected
     if outcome == "rate":
         assert result.retry_after == 75

@@ -14,6 +14,7 @@ import {
 import { api, ApiError, setCsrf } from "./api";
 import type {
   Currency,
+  Invitation,
   Occurrence,
   Recurring,
   Session,
@@ -50,7 +51,11 @@ import {
 } from "./panels";
 import Payments from "./Payments";
 import ActivityPanel from "./ActivityPanel";
-import QuickTemplates from "./QuickTemplates";
+import {
+  ChangePasswordModal,
+  InvitationAccept,
+  InvitationModal,
+} from "./AccountForms";
 import BrandIcon from "./BrandIcon";
 import type { BrandIconName } from "./BrandIcon";
 
@@ -64,7 +69,7 @@ type View =
   | "settings";
 const viewNames: Record<View, string> = {
   overview: "Обзор",
-  payments: "Продления",
+  payments: "Регулярные платежи",
   calendar: "Календарь",
   history: "История оплат",
   team: "Пользователи",
@@ -72,22 +77,22 @@ const viewNames: Record<View, string> = {
   settings: "Настройки",
 };
 const pageTitles: Record<View, string> = {
-  overview: "Услуги и продления",
-  payments: "Продления услуг",
-  calendar: "Календарь продлений",
+  overview: "Регулярные платежи",
+  payments: "Регулярные платежи",
+  calendar: "Календарь платежей",
   history: "История оплат",
-  team: "Пользователи модуля",
+  team: "Участники команды",
   activity: "Журнал действий",
   settings: "Настройки",
 };
 const descriptions: Record<View, string> = {
-  overview: "Стоимость услуг, сроки продления и отметки об оплате.",
-  payments: "Услуги на учёте и их продления за выбранный месяц.",
-  calendar: "Сроки продления услуг по дням месяца.",
-  history: "Оплата продлений за предыдущие месяцы.",
-  team: "Учётные записи и права доступа к модулю продлений.",
+  overview: "Плановые суммы, сроки и отметки об оплате.",
+  payments: "Платежи за выбранный месяц.",
+  calendar: "Сроки оплаты по дням месяца.",
+  history: "Оплаты за предыдущие месяцы.",
+  team: "Учётные записи и права доступа участников команды.",
   activity: "Действия пользователей и статусы отправки напоминаний.",
-  settings: "Напоминания, часовой пояс и правила учёта продлений.",
+  settings: "Напоминания и параметры учёта платежей.",
 };
 const navigationKey = "invoice-keeper-navigation";
 function restoreNavigation(): { view: View; month: string } {
@@ -118,6 +123,19 @@ function clearNavigation() {
     /* Navigation remains usable when browser storage is unavailable. */
   }
 }
+function readInvitationToken() {
+  const value = new URLSearchParams(window.location.hash.slice(1)).get(
+    "invite",
+  );
+  return value ? (value.length <= 512 ? value : "invalid") : null;
+}
+function removeInvitationFragment() {
+  window.history.replaceState(
+    null,
+    "",
+    window.location.pathname + window.location.search,
+  );
+}
 export default function App() {
   const [savedNavigation] = useState(restoreNavigation);
   const [session, setSession] = useState<Session | null>(null);
@@ -143,9 +161,49 @@ export default function App() {
   const [editSeries, setEditSeries] = useState<Recurring | null>(null);
   const [userModal, setUserModal] = useState<User | "new" | null>(null);
   const [deleteUser, setDeleteUser] = useState<User | null>(null);
+  const [invitations, setInvitations] = useState<Invitation[]>([]);
+  const [invitationOpen, setInvitationOpen] = useState(false);
+  const [revokeInvitation, setRevokeInvitation] = useState<Invitation | null>(
+    null,
+  );
+  const [invitationToken, setInvitationToken] = useState(readInvitationToken);
+  const [passwordOpen, setPasswordOpen] = useState(false);
+  const [authNotice, setAuthNotice] = useState("");
   const today = settings?.today || new Date().toLocaleDateString("en-CA");
   const activeMonth = month || today.slice(0, 7);
   const isAdmin = session?.user.role === "admin";
+  function resetSession() {
+    clearNavigation();
+    setCsrf("");
+    setSession(null);
+    setOccurrences([]);
+    setRecurring([]);
+    setUsers([]);
+    setInvitations([]);
+    setSettings(null);
+    setSummary(null);
+    setMonth("");
+    setCurrency("RUB");
+    setAddPreset(null);
+    setPayment(null);
+    setDeletePayment(null);
+    setEditSeries(null);
+    setUserModal(null);
+    setDeleteUser(null);
+    setInvitationOpen(false);
+    setRevokeInvitation(null);
+    setPasswordOpen(false);
+    setMobileOpen(false);
+    setToast("");
+    setError("");
+    setAuthNotice("");
+    setView("overview");
+  }
+  useEffect(() => {
+    const changed = () => setInvitationToken(readInvitationToken());
+    window.addEventListener("hashchange", changed);
+    return () => window.removeEventListener("hashchange", changed);
+  }, []);
   const changeView = (next: View) => {
     setView(next);
     setMobileOpen(false);
@@ -202,32 +260,16 @@ export default function App() {
     };
   }, [mobileOpen]);
   useEffect(() => {
-    const expire = () => {
-      clearNavigation();
-      setSession(null);
-      setCsrf("");
-      setOccurrences([]);
-      setRecurring([]);
-      setUsers([]);
-      setSettings(null);
-      setSummary(null);
-      setMonth("");
-      setCurrency("RUB");
-      setAddPreset(null);
-      setPayment(null);
-      setDeletePayment(null);
-      setEditSeries(null);
-      setUserModal(null);
-      setDeleteUser(null);
-      setMobileOpen(false);
-      setToast("");
-      setView("overview");
-    };
+    const expire = () => resetSession();
     window.addEventListener("invoice-session-expired", expire);
     return () => window.removeEventListener("invoice-session-expired", expire);
   }, []);
   useEffect(() => {
     let mounted = true;
+    if (readInvitationToken()) {
+      setChecking(false);
+      return;
+    }
     api<Session>("/auth/me")
       .then((result) => {
         if (mounted) {
@@ -257,13 +299,11 @@ export default function App() {
     setLoading(true);
     setError("");
     Promise.all([
-      api<Occurrence[]>("/payment-occurrences"),
       api<Recurring[]>("/recurring-payments"),
       api<Settings>("/settings"),
     ])
-      .then(([items, definitions, config]) => {
+      .then(([definitions, config]) => {
         if (mounted) {
-          setOccurrences(items);
           setRecurring(definitions);
           setSettings(config);
         }
@@ -290,13 +330,14 @@ export default function App() {
     setLoading(true);
     api<Occurrence[]>(`/payment-occurrences?month=${activeMonth}`)
       .then(async (selected) => {
-        const result = await api<Summary>(
-          `/payments/summary?month=${activeMonth}`,
-        );
+        const [result, allItems] = await Promise.all([
+          api<Summary>(`/payments/summary?month=${activeMonth}`),
+          api<Occurrence[]>("/payment-occurrences"),
+        ]);
         if (mounted) {
           setSummary(result);
-          setOccurrences((previous) => [
-            ...previous.filter((i) => !i.due_date.startsWith(activeMonth)),
+          setOccurrences([
+            ...allItems.filter((i) => !i.due_date.startsWith(activeMonth)),
             ...selected,
           ]);
         }
@@ -312,7 +353,7 @@ export default function App() {
     };
   }, [session, activeMonth, revision]);
   useEffect(() => {
-    if (!isAdmin || view !== "team") return;
+    if (!isAdmin) return;
     let mounted = true;
     setLoading(true);
     api<User[]>("/users")
@@ -324,6 +365,20 @@ export default function App() {
       })
       .finally(() => {
         if (mounted) setLoading(false);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [isAdmin, revision]);
+  useEffect(() => {
+    if (!isAdmin || view !== "team") return;
+    let mounted = true;
+    api<Invitation[]>("/invitations")
+      .then((result) => {
+        if (mounted) setInvitations(result);
+      })
+      .catch((reason) => {
+        if (mounted) setError((reason as Error).message);
       });
     return () => {
       mounted = false;
@@ -350,38 +405,19 @@ export default function App() {
   async function logout() {
     try {
       await api("/auth/logout", { method: "POST" });
-      clearNavigation();
-      setCsrf("");
-      setSession(null);
-      setOccurrences([]);
-      setRecurring([]);
-      setUsers([]);
-      setSettings(null);
-      setSummary(null);
-      setMonth("");
-      setCurrency("RUB");
-      setAddPreset(null);
-      setPayment(null);
-      setDeletePayment(null);
-      setEditSeries(null);
-      setUserModal(null);
-      setDeleteUser(null);
-      setMobileOpen(false);
-      setToast("");
-      setError("");
-      setView("overview");
+      resetSession();
     } catch (e) {
       setError((e as Error).message);
     }
   }
   async function stopRecurring() {
-    if (!deletePayment) return;
+    if (!deletePayment?.can_manage) return;
     await api(`/recurring-payments/${deletePayment.recurring_payment_id}`, {
       method: "DELETE",
     });
     setDeletePayment(null);
     setPayment(null);
-    refresh("Учёт услуги прекращён. История оплат сохранена.");
+    refresh("Регулярный платёж прекращён. История оплат сохранена.");
   }
   async function removeUser() {
     if (!deleteUser) return;
@@ -389,6 +425,24 @@ export default function App() {
     setDeleteUser(null);
     refresh("Пользователь удалён.");
   }
+  if (invitationToken)
+    return (
+      <InvitationAccept
+        token={invitationToken}
+        onBack={() => {
+          removeInvitationFragment();
+          setInvitationToken(null);
+        }}
+        onAccepted={(result) => {
+          resetSession();
+          removeInvitationFragment();
+          setInvitationToken(null);
+          setCsrf(result.csrf_token);
+          setSession(result);
+          setChecking(false);
+        }}
+      />
+    );
   if (checking)
     return (
       <div className="boot-screen">
@@ -401,8 +455,10 @@ export default function App() {
     return (
       <>
         <Login
+          notice={authNotice}
           onLogin={(s) => {
             setError("");
+            setAuthNotice("");
             setSession(s);
           }}
         />
@@ -418,7 +474,7 @@ export default function App() {
     );
   const nav: { id: View; icon: BrandIconName }[] = [
     { id: "overview", icon: "overview" },
-    { id: "payments", icon: "services" },
+    { id: "payments", icon: "payments" },
     { id: "calendar", icon: "calendar" },
     { id: "history", icon: "history" },
   ];
@@ -446,7 +502,7 @@ export default function App() {
         aria-label="Навигация"
       >
         <Logo />
-        <p className="nav-label">УСЛУГИ</p>
+        <p className="nav-label">ПЛАТЕЖИ</p>
         <nav aria-label="Основная навигация">
           {nav.map((item) => (
             <button
@@ -566,21 +622,31 @@ export default function App() {
               <h1>{pageTitles[view]}</h1>
               <p>{descriptions[view]}</p>
             </div>
-            {isAdmin && ["overview", "payments", "calendar"].includes(view) && (
+            {["overview", "payments", "calendar"].includes(view) && (
               <button
                 className="button primary"
                 onClick={() => setAddPreset("")}
               >
-                <Plus size={18} /> Добавить услугу
+                <Plus size={18} /> Добавить платёж
               </button>
             )}
             {isAdmin && view === "team" && (
-              <button
-                className="button primary"
-                onClick={() => setUserModal("new")}
-              >
-                <Plus size={18} /> Добавить пользователя
-              </button>
+              <div className="page-heading-actions">
+                <button
+                  className="button secondary"
+                  onClick={() => setUserModal("new")}
+                >
+                  <Plus size={17} />
+                  Создать аккаунт
+                </button>
+                <button
+                  className="button primary"
+                  onClick={() => setInvitationOpen(true)}
+                >
+                  <Plus size={17} />
+                  Пригласить
+                </button>
+              </div>
             )}
           </div>
           {error && (
@@ -656,23 +722,23 @@ export default function App() {
             <>
               <section className="metrics" aria-label="Итоги за месяц">
                 <Metric
-                  label="Стоимость продлений"
+                  label="План на месяц"
                   value={sums ? money(sums.planned, currency) : "—"}
-                  caption={`${currencyItems.length} ${plural(currencyItems.length, ["продление", "продления", "продлений"])} за месяц`}
-                  icon={<BrandIcon name="services" size={19} />}
+                  caption={`${currencyItems.length} ${plural(currencyItems.length, ["платёж", "платежа", "платежей"])} за месяц`}
+                  icon={<BrandIcon name="payments" size={19} />}
                   variant="plan"
                 />
                 <Metric
                   label="Оплачено"
                   value={sums ? money(sums.paid, currency) : "—"}
-                  caption={`${counts.paid} ${plural(counts.paid, ["продление оплачено", "продления оплачены", "продлений оплачено"])}`}
+                  caption={`${counts.paid} ${plural(counts.paid, ["платёж оплачен", "платежа оплачено", "платежей оплачено"])}`}
                   icon={<BrandIcon name="check" size={19} />}
                   variant="paid"
                 />
                 <Metric
                   label="Ожидают оплаты"
                   value={sums ? money(sums.unpaid, currency) : "—"}
-                  caption={`${counts.unpaid} ${plural(counts.unpaid, ["продление", "продления", "продлений"])} без отметки`}
+                  caption={`${counts.unpaid} ${plural(counts.unpaid, ["платёж", "платежа", "платежей"])} без отметки`}
                   icon={<BrandIcon name="clock" size={19} />}
                   variant="unpaid"
                 />
@@ -681,8 +747,8 @@ export default function App() {
                   value={sums ? money(sums.overdue, currency) : "—"}
                   caption={
                     counts.overdue
-                      ? `${counts.overdue} ${plural(counts.overdue, ["продление требует", "продления требуют", "продлений требуют"])} внимания`
-                      : "Нет просроченных продлений"
+                      ? `${counts.overdue} ${plural(counts.overdue, ["платёж требует", "платежа требуют", "платежей требуют"])} внимания`
+                      : "Нет просроченных платежей"
                   }
                   icon={<BrandIcon name="warning" size={19} />}
                   variant="overdue"
@@ -712,6 +778,7 @@ export default function App() {
               onRefresh={() => setRevision((v) => v + 1)}
               onSelect={setPayment}
               onPay={(item) =>
+                item.can_manage &&
                 setPayment({ ...item, is_paid: true, paid_at: today })
               }
             />
@@ -722,9 +789,6 @@ export default function App() {
               onSelect={setPayment}
               onCalendar={() => changeView("calendar")}
             />
-          )}
-          {view === "overview" && isAdmin && (
-            <QuickTemplates onSelect={setAddPreset} />
           )}
           {view === "calendar" && (
             <Calendar
@@ -740,6 +804,8 @@ export default function App() {
               session={session}
               onEdit={setUserModal}
               onDelete={setDeleteUser}
+              invitations={invitations}
+              onRevokeInvitation={setRevokeInvitation}
             />
           )}
           {view === "settings" && (
@@ -747,6 +813,11 @@ export default function App() {
               settings={settings}
               activeCount={recurring.filter((p) => p.active !== false).length}
               onActivity={isAdmin ? () => changeView("activity") : undefined}
+              onChangePassword={
+                !isAdmin ? () => setPasswordOpen(true) : undefined
+              }
+              canConfigureTelegram={!!isAdmin}
+              onTelegramChanged={() => setRevision((value) => value + 1)}
             />
           )}
           {view === "activity" && isAdmin && (
@@ -763,14 +834,24 @@ export default function App() {
           </button>
         </div>
       )}
-      {addPreset !== null && isAdmin && (
+      {addPreset !== null && (
         <AddPayment
           today={today}
           initialName={addPreset}
+          owners={
+            isAdmin
+              ? [
+                  ...new Map(
+                    [session.user, ...users].map((owner) => [owner.id, owner]),
+                  ).values(),
+                ]
+              : undefined
+          }
+          defaultOwnerId={session.user.id}
           onClose={() => setAddPreset(null)}
           onSuccess={() => {
             setAddPreset(null);
-            refresh("Услуга добавлена в учёт продлений.");
+            refresh("Регулярный платёж добавлен.");
           }}
         />
       )}
@@ -778,7 +859,7 @@ export default function App() {
         <PaymentModal
           item={payment}
           today={today}
-          isAdmin={!!isAdmin}
+          canManage={payment.can_manage}
           onClose={() => setPayment(null)}
           onSuccess={() => {
             setPayment(null);
@@ -786,7 +867,7 @@ export default function App() {
           }}
           onDelete={() => setDeletePayment(payment)}
           onEditSeries={
-            isAdmin && seriesForPayment?.active
+            seriesForPayment?.active && seriesForPayment.can_manage
               ? () => {
                   setEditSeries(seriesForPayment);
                   setPayment(null);
@@ -795,7 +876,7 @@ export default function App() {
           }
         />
       )}
-      {editSeries && isAdmin && (
+      {editSeries?.can_manage && (
         <EditRecurringModal
           series={editSeries}
           today={today}
@@ -808,8 +889,8 @@ export default function App() {
       )}
       {deletePayment && (
         <Confirm
-          title="Прекратить учёт услуги?"
-          text={`«${deletePayment.name}»: учёт будущих продлений и напоминания в модуле будут остановлены. История оплат сохранится.`}
+          title="Прекратить регулярный платёж?"
+          text={`«${deletePayment.name}»: будущие периоды и напоминания будут остановлены. История оплат сохранится.`}
           confirm="Прекратить учёт"
           onConfirm={stopRecurring}
           onClose={() => setDeletePayment(null)}
@@ -832,10 +913,40 @@ export default function App() {
       {deleteUser && (
         <Confirm
           title="Удалить пользователя?"
-          text={`Пользователь ${deleteUser.full_name || deleteUser.username} потеряет доступ к модулю продлений. Его активные сессии будут завершены.`}
+          text={`Пользователь ${deleteUser.full_name || deleteUser.username} потеряет доступ к приложению. Его платежи будут переданы администратору с сохранением истории. Активные сессии будут завершены.`}
           confirm="Удалить пользователя"
           onConfirm={removeUser}
           onClose={() => setDeleteUser(null)}
+        />
+      )}
+      {invitationOpen && isAdmin && (
+        <InvitationModal
+          onClose={() => setInvitationOpen(false)}
+          onCreated={() => setRevision((value) => value + 1)}
+        />
+      )}
+      {revokeInvitation && isAdmin && (
+        <Confirm
+          title="Отозвать приглашение?"
+          text={`Ссылка для ${revokeInvitation.full_name || revokeInvitation.username} перестанет действовать.`}
+          confirm="Отозвать"
+          onClose={() => setRevokeInvitation(null)}
+          onConfirm={async () => {
+            await api(`/invitations/${revokeInvitation.id}`, {
+              method: "DELETE",
+            });
+            setRevokeInvitation(null);
+            refresh("Приглашение отозвано.");
+          }}
+        />
+      )}
+      {passwordOpen && !isAdmin && (
+        <ChangePasswordModal
+          onClose={() => setPasswordOpen(false)}
+          onChanged={() => {
+            resetSession();
+            setAuthNotice("Пароль изменён. Войдите снова.");
+          }}
         />
       )}
     </div>

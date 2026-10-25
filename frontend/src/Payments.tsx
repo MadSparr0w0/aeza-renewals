@@ -65,7 +65,7 @@ export default function Payments({
       (i) =>
         (status === "all" || i.status === status) &&
         (currency === "all" || i.currency === currency) &&
-        i.name
+        `${i.name} ${isAdmin ? i.owner_name || "" : ""}`
           .toLocaleLowerCase("ru")
           .includes(search.trim().toLocaleLowerCase("ru")),
     )
@@ -89,20 +89,20 @@ export default function Payments({
       <div className="table-card-heading">
         <div>
           <h2>
-            {history ? "Продления за период" : "Продления за месяц"}{" "}
+            {history ? "Платежи за период" : "Платежи за месяц"}{" "}
             <span>{items.length}</span>
           </h2>
           <p>
             {history
-              ? "Сроки продления и фактические даты оплаты."
-              : "Стоимость услуг и отметки об оплате продлений."}
+              ? "Сроки и фактические даты оплаты."
+              : "Суммы, сроки и отметки об оплате."}
           </p>
         </div>
         <div className="table-header-actions">
           <button
             className="icon-button"
-            title="Обновить продления"
-            aria-label="Обновить продления"
+            title="Обновить платежи"
+            aria-label="Обновить платежи"
             onClick={onRefresh}
             disabled={loading}
           >
@@ -121,9 +121,9 @@ export default function Payments({
         </div>
       </div>
       <div className="table-filters">
-        <div className="status-tabs" role="group" aria-label="Статус продлений">
+        <div className="status-tabs" role="group" aria-label="Статус платежей">
           {[
-            { id: "all", label: "Все продления" },
+            { id: "all", label: "Все платежи" },
             { id: "pending", label: "К оплате" },
             { id: "paid", label: "Оплачено" },
             { id: "overdue", label: "Просрочено" },
@@ -148,9 +148,11 @@ export default function Payments({
           <label className="search-field">
             <Search size={16} />
             <input
-              aria-label="Найти услугу"
+              aria-label="Найти платёж"
               type="search"
-              placeholder="Название услуги"
+              placeholder={
+                isAdmin ? "Платёж или ответственный" : "Название платежа"
+              }
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               onKeyDown={(e) => {
@@ -168,7 +170,7 @@ export default function Payments({
           </label>
           <div className="select-wrap">
             <select
-              aria-label="Валюта продлений"
+              aria-label="Валюта платежей"
               value={currency}
               onChange={(e) => setCurrency(e.target.value)}
             >
@@ -192,7 +194,7 @@ export default function Payments({
               value={sortBy}
               onChange={(e) => setSortBy(e.target.value)}
             >
-              <option value="due_date">По сроку продления</option>
+              <option value="due_date">По сроку оплаты</option>
               <option value="name">По названию</option>
               <option value="amount">По сумме</option>
             </select>
@@ -228,14 +230,14 @@ export default function Payments({
       </div>
       {loading && !items.length ? (
         <div className="loading-block">
-          <LoaderCircle className="spin" /> Загружаем продления…
+          <LoaderCircle className="spin" /> Загружаем платежи…
         </div>
       ) : displayItems.length ? (
         <>
           <div className="table-scroll payment-desktop-table">
             <table className="payments-table">
               <caption className="sr-only">
-                Продления за выбранный месяц. Найдено: {displayItems.length}.
+                Платежи за выбранный месяц. Найдено: {displayItems.length}.
               </caption>
               <colgroup>
                 <col className="col-name" />
@@ -247,9 +249,9 @@ export default function Payments({
               </colgroup>
               <thead>
                 <tr>
-                  <th scope="col">Название услуги</th>
-                  <th scope="col">Стоимость</th>
-                  <th scope="col">Срок продления</th>
+                  <th scope="col">Название платежа</th>
+                  <th scope="col">Сумма</th>
+                  <th scope="col">Срок оплаты</th>
                   <th scope="col">Статус</th>
                   <th scope="col">Дата оплаты</th>
                   <th scope="col">
@@ -268,14 +270,17 @@ export default function Payments({
                         <span
                           className={`payment-icon icon-color-${index % 5}`}
                         >
-                          <BrandIcon name="services" size={20} />
+                          <BrandIcon name="payments" size={20} />
                         </span>
                         <span>
                           <strong>{item.name}</strong>
                           <small>
+                            {isAdmin &&
+                              item.owner_name &&
+                              `${item.owner_name} · `}
                             {item.recurring_active
-                              ? "Ежемесячное продление"
-                              : "Учёт услуги прекращён"}
+                              ? "Ежемесячный платёж"
+                              : "Регулярный платёж прекращён"}
                           </small>
                         </span>
                       </button>
@@ -330,6 +335,7 @@ export default function Payments({
                             onClick={() => onSelect(item)}
                             aria-label={`Изменить оплату: ${item.name}`}
                             title="Изменить оплату"
+                            disabled={!item.can_manage}
                           >
                             <Pencil size={16} />
                           </button>
@@ -338,6 +344,7 @@ export default function Payments({
                             className="pay-button"
                             onClick={() => onPay(item)}
                             title={`Отметить оплату: ${item.name}`}
+                            disabled={!item.can_manage}
                           >
                             <Check size={15} />
                             <span>Отметить оплату</span>
@@ -359,7 +366,7 @@ export default function Payments({
           </div>
           <ul
             className="payment-mobile-list"
-            aria-label="Продления за выбранный месяц"
+            aria-label="Платежи за выбранный месяц"
           >
             {displayItems.map((item) => (
               <li key={item.id}>
@@ -373,13 +380,16 @@ export default function Payments({
                     </button>
                     <Status item={item} />
                   </div>
+                  {isAdmin && item.owner_name && (
+                    <p className="mobile-payment-owner">{item.owner_name}</p>
+                  )}
                   <div className="mobile-payment-amount">
                     {money(item.amount, item.currency)}{" "}
                     <span>{item.currency}</span>
                   </div>
                   <dl className="mobile-payment-dates">
                     <div>
-                      <dt>Срок продления</dt>
+                      <dt>Срок оплаты</dt>
                       <dd
                         className={
                           item.status === "overdue" ? "date-overdue" : ""
@@ -411,12 +421,13 @@ export default function Payments({
                   )}
                   {!item.recurring_active && (
                     <p className="mobile-payment-note">
-                      Учёт услуги прекращён.
+                      Регулярный платёж прекращён.
                     </p>
                   )}
                   <div className="mobile-payment-actions">
                     <button
                       className={`button ${item.is_paid ? "secondary" : "primary"}`}
+                      disabled={!item.can_manage}
                       onClick={() =>
                         item.is_paid ? onSelect(item) : onPay(item)
                       }
@@ -443,24 +454,22 @@ export default function Payments({
       ) : (
         <Empty
           title={
-            hasFilters ? "Ничего не найдено" : "В этом месяце продлений нет"
+            hasFilters ? "Ничего не найдено" : "В этом месяце платежей нет"
           }
           text={
             hasFilters
               ? "Попробуйте изменить фильтры или поисковый запрос."
-              : "Выберите другой месяц или добавьте услугу в учёт."
+              : "Выберите другой месяц или добавьте регулярный платёж."
           }
           action={
             hasFilters ? (
               <button className="button secondary" onClick={resetFilters}>
-                <X size={15} /> Показать все продления
+                <X size={15} /> Показать все платежи
               </button>
             ) : (
-              isAdmin && (
-                <button className="button secondary small" onClick={onAdd}>
-                  <Plus size={15} /> Добавить услугу
-                </button>
-              )
+              <button className="button secondary small" onClick={onAdd}>
+                <Plus size={15} /> Добавить платёж
+              </button>
             )
           }
         />
@@ -469,7 +478,7 @@ export default function Payments({
         <span aria-live="polite" aria-atomic="true">
           <span className="footer-status-dot" />{" "}
           {displayItems.length
-            ? `Показано ${displayItems.length} из ${items.length} продлений`
+            ? `Показано ${displayItems.length} из ${items.length} платежей`
             : "Данные за выбранный период"}
         </span>
       </div>
